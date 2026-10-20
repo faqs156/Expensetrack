@@ -73,8 +73,7 @@ class AppController extends ChangeNotifier {
     loading = true;
     notifyListeners();
     try {
-      loginSuccessMessage =
-          'Signed in as ${driveSync.email}. Syncing your vault…';
+      loginSuccessMessage = 'Signed in as ${driveSync.email}';
       notifyListeners();
       // Prefer silent Drive token; fall back to one user gesture popup.
       await _loadVaultAndSync(interactive: false);
@@ -82,8 +81,6 @@ class AppController extends ChangeNotifier {
         driveSync.clearLastError();
         await _loadVaultAndSync(interactive: true);
       }
-      loginSuccessMessage =
-          'Signed in as ${driveSync.email}. Your data is up to date.';
       driveSync.clearLastError();
       _startPeriodicSync();
     } catch (e) {
@@ -93,10 +90,7 @@ class AppController extends ChangeNotifier {
           await _loadVaultAndSync(interactive: false);
         } catch (_) {}
       }
-      loginSuccessMessage =
-          'Signed in as ${driveSync.email}. '
-          'If sync did not finish, open Settings → Sync now '
-          '(allow popups if the browser asks).';
+      loginSuccessMessage = 'Signed in as ${driveSync.email}';
       _startPeriodicSync();
     } finally {
       loading = false;
@@ -149,9 +143,7 @@ class AppController extends ChangeNotifier {
       await driveSync.initialize();
 
       if (!GoogleAuthConfig.isConfigured) {
-        error =
-            'Login is not configured. This build needs GOOGLE_CLIENT_ID and '
-            'GOOGLE_ALLOWED_EMAILS (GitHub Actions repository secrets).';
+        error = 'Sign-in is unavailable right now. Try again later.';
         return;
       }
 

@@ -39,9 +39,7 @@ class LoginScreen extends StatelessWidget {
                   ),
                   const SizedBox(height: 8),
                   Text(
-                    'Sign in once with an allowed Google account. '
-                    'This browser will remember you after refresh; '
-                    'other Google accounts cannot open the vault.',
+                    'Sign in with Google to continue.',
                     textAlign: TextAlign.center,
                     style: theme.textTheme.bodyMedium?.copyWith(
                       color: theme.colorScheme.onSurfaceVariant,
@@ -50,8 +48,7 @@ class LoginScreen extends StatelessWidget {
                   const SizedBox(height: 28),
                   if (!GoogleAuthConfig.isConfigured) ...[
                     Text(
-                      'Login is not configured in this build '
-                      '(missing GOOGLE_CLIENT_ID or GOOGLE_ALLOWED_EMAILS).',
+                      'Sign-in is unavailable right now. Try again later.',
                       textAlign: TextAlign.center,
                       style: TextStyle(color: theme.colorScheme.error),
                     ),

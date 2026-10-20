@@ -15,13 +15,13 @@ class SettingsScreen extends StatelessWidget {
 
   String _driveSyncSubtitle(AppController app) {
     if (app.driveSync.needsGoogleReconnect) {
-      return 'Logged in locally — reconnect Google to sync Drive';
+      return 'Tap Sync now to connect Drive';
     }
     final last = app.driveSync.lastSyncedAt;
     if (app.driveSync.status == DriveSyncStatus.syncing) {
-      return 'Syncing with Google Drive…';
+      return 'Syncing…';
     }
-    if (last == null) return 'Logged in — vault syncs via Google Drive';
+    if (last == null) return 'Signed in';
     final local = last.toLocal();
     return 'Last synced ${local.year}-'
         '${local.month.toString().padLeft(2, '0')}-'
@@ -35,7 +35,7 @@ class SettingsScreen extends StatelessWidget {
     try {
       await context.read<AppController>().syncGoogleDriveNow();
       messenger.showSnackBar(
-        const SnackBar(content: Text('Google Drive sync finished')),
+        const SnackBar(content: Text('Sync finished')),
       );
     } catch (e) {
       messenger.showSnackBar(SnackBar(content: Text('Sync failed: $e')));
@@ -330,12 +330,9 @@ class SettingsScreen extends StatelessWidget {
                 ),
           title: const Text('Sync now'),
           subtitle: Text(
-            app.driveSync.needsGoogleReconnect
-                ? 'Chrome may ask for Google once, then uploads all transactions, '
-                    'budgets, categories & settings'
-                : app.driveSync.hasPendingPush
-                    ? 'Uploading local changes to Drive…'
-                    : 'Full vault sync (also ~every 5 minutes while Google is connected)',
+            app.driveSync.hasPendingPush
+                ? 'Uploading changes…'
+                : 'Upload and download your data',
           ),
           onTap: app.driveSync.status == DriveSyncStatus.syncing
               ? null
@@ -345,7 +342,7 @@ class SettingsScreen extends StatelessWidget {
           contentPadding: EdgeInsets.zero,
           leading: const Icon(Icons.logout),
           title: const Text('Sign out'),
-          subtitle: const Text('Return to login (Drive backup is kept)'),
+          subtitle: const Text('Sign out of this device'),
           onTap: () async {
             await context.read<AppController>().signOutGoogle();
           },
@@ -421,32 +418,8 @@ class SettingsScreen extends StatelessWidget {
           leading: const Icon(Icons.phonelink_lock_outlined),
           title: const Text('Where data lives'),
           subtitle: Text(
-            kIsWeb
-                ? 'Logged-in vault syncs via private Google Drive app data. '
-                    'Works offline; syncs when you are online.'
-                : 'SQLite on this device; syncs to Google Drive when signed in.',
+            'Stored on this device and synced with your Google account.',
           ),
-          onTap: () {
-            showDialog<void>(
-              context: context,
-              builder: (ctx) => AlertDialog(
-                title: const Text('Your vault'),
-                content: const Text(
-                  'Only allowlisted Google accounts can open ExpenseTrack.\n\n'
-                  'After login, your vault syncs to a private Google Drive app-data file '
-                  'for that account (hidden from My Drive). Same account on another device '
-                  'gets the same data — last write wins.\n\n'
-                  'Offline edits stay on this device until the next sync.',
-                ),
-                actions: [
-                  TextButton(
-                    onPressed: () => Navigator.pop(ctx),
-                    child: const Text('Close'),
-                  ),
-                ],
-              ),
-            );
-          },
         ),
         const Divider(height: 32),
         Text('About', style: theme.textTheme.titleSmall),
@@ -460,22 +433,15 @@ class SettingsScreen extends StatelessWidget {
           contentPadding: EdgeInsets.zero,
           leading: const Icon(Icons.lock_outline),
           title: const Text('Privacy'),
-          subtitle: const Text(
-            'Allowlisted Google login. Local SQLite + private Drive sync. No ads.',
-          ),
+          subtitle: const Text('No ads. Your data stays with your Google account.'),
           onTap: () {
             showDialog<void>(
               context: context,
               builder: (ctx) => AlertDialog(
                 title: const Text('Privacy'),
-                content: Text(
-                  kIsWeb
-                      ? 'Local data: SQLite in this browser (IndexedDB). '
-                          'Optional: sign in with Google to sync a private file in Drive app data '
-                          '(same Google account → same vault). We do not run our own server. '
-                          'Safari may clear site data — Drive sync or JSON backups protect you.'
-                      : 'Local SQLite on device. Optional Google Drive app-data sync when signed in. '
-                          'No advertising SDKs.',
+                content: const Text(
+                  'ExpenseTrack stores data on this device and can sync it with '
+                  'your Google account. There are no ads or analytics.',
                 ),
                 actions: [
                   TextButton(

@@ -111,9 +111,7 @@ class GoogleDriveSyncService extends ChangeNotifier {
 
   Future<void> _acceptOrRejectUser(GoogleSignInAccount user) async {
     if (!GoogleAuthConfig.isEmailAllowed(user.email)) {
-      lastError =
-          'This Google account is not allowed (${user.email}). '
-          'Ask the owner to add it to GOOGLE_ALLOWED_EMAILS.';
+      lastError = 'This Google account cannot access ExpenseTrack.';
       status = DriveSyncStatus.error;
       account = null;
       notifyListeners();
@@ -150,17 +148,23 @@ class GoogleDriveSyncService extends ChangeNotifier {
       if (e.code == GoogleSignInExceptionCode.uiUnavailable ||
           lower.contains('popup') ||
           lower.contains('uiunavailable')) {
-        return 'Google popup was blocked. Use Safari (not a tiny in-app browser), '
-            'allow popups for this site, then tap Sync now.';
+        return 'Could not open Google sign-in. Allow popups and try again.';
       }
       if (e.code == GoogleSignInExceptionCode.canceled) {
         return null;
       }
     }
     if (lower.contains('popup') || lower.contains('uiunavailable')) {
-      return 'Google popup was blocked. Allow popups for this site, then tap Sync now.';
+      return 'Could not open Google sign-in. Allow popups and try again.';
     }
-    return text;
+    // Keep failures short — never surface env/secret names to users.
+    if (lower.contains('google_allowed') ||
+        lower.contains('google_client') ||
+        lower.contains('dart-define') ||
+        lower.contains('repository secret')) {
+      return 'Something went wrong. Try again.';
+    }
+    return 'Something went wrong. Try again.';
   }
 
   Future<void> _rememberSignedIn(String email) async {
@@ -180,18 +184,14 @@ class GoogleDriveSyncService extends ChangeNotifier {
 
   Future<void> signInInteractive() async {
     if (!GoogleAuthConfig.isConfigured) {
-      throw StateError(
-        'GOOGLE_CLIENT_ID and GOOGLE_ALLOWED_EMAILS must be configured. '
-        'See README → Google Drive sync.',
-      );
+      throw StateError('Sign-in is unavailable right now.');
     }
     lastError = null;
     await ensureGoogleConnected();
     try {
       await _ensureDriveAuthorized(interactive: true);
     } catch (e) {
-      lastError = _friendlyGoogleError(e) ??
-          'Signed in. Tap Sync now if Drive access is needed.';
+      lastError = _friendlyGoogleError(e) ?? 'Could not connect. Try Sync now.';
       // Stay signed in — vault UI still works offline.
     }
     notifyListeners();
@@ -205,7 +205,7 @@ class GoogleDriveSyncService extends ChangeNotifier {
   }) async {
     if (account != null) return;
     if (!GoogleAuthConfig.isConfigured) {
-      throw StateError('Google login is not configured in this build.');
+      throw StateError('Sign-in is unavailable right now.');
     }
     lastError = null;
 
@@ -241,10 +241,7 @@ class GoogleDriveSyncService extends ChangeNotifier {
       await done.future.timeout(
         timeout,
         onTimeout: () {
-          throw StateError(
-            'Google sign-in timed out. Pick your allowlisted account when Chrome asks, '
-            'then tap Sync now again.',
-          );
+          throw StateError('Sign-in timed out. Try again.');
         },
       );
     } finally {
@@ -297,8 +294,7 @@ class GoogleDriveSyncService extends ChangeNotifier {
       _hasPendingPush = false;
     } catch (e) {
       if (!interactive) {
-        lastError =
-            'Auto-sync paused. Tap Sync now to upload budgets & transactions.';
+        lastError = 'Sync paused. Tap Sync now to retry.';
         status = DriveSyncStatus.error;
         notifyListeners();
       } else {
@@ -385,9 +381,7 @@ class GoogleDriveSyncService extends ChangeNotifier {
     } catch (e) {
       final friendly = _friendlyGoogleError(e);
       lastError = friendly ??
-          (interactive
-              ? e.toString()
-              : 'Auto-sync paused. Tap Sync now when you can allow Google.');
+          (interactive ? 'Sync failed. Try again.' : 'Sync paused. Tap Sync now.');
       status = DriveSyncStatus.error;
       notifyListeners();
       if (interactive && friendly == null) rethrow;
@@ -434,9 +428,7 @@ class GoogleDriveSyncService extends ChangeNotifier {
     } catch (e) {
       final friendly = _friendlyGoogleError(e);
       lastError = friendly ??
-          (interactive
-              ? e.toString()
-              : 'Auto-sync paused. Tap Sync now when you can allow Google.');
+          (interactive ? 'Sync failed. Try again.' : 'Sync paused. Tap Sync now.');
       status = DriveSyncStatus.error;
       notifyListeners();
       if (interactive && friendly == null) rethrow;
@@ -533,9 +525,7 @@ class GoogleDriveSyncService extends ChangeNotifier {
       }
       if (auth == null) {
         throw StateError(
-          interactive
-              ? 'Google Drive permission was not granted'
-              : 'Drive authorization expired',
+          interactive ? 'Permission not granted. Try again.' : 'Session expired.',
         );
       }
       return auth;
