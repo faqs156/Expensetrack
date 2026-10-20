@@ -52,6 +52,9 @@ class AppController extends ChangeNotifier {
   String? loginSuccessMessage;
   bool vaultLoaded = false;
 
+  /// True when this browser needs Sync now to load Drive (common on Safari).
+  bool needsCloudPull = false;
+
   void clearLoginSuccessMessage() {
     loginSuccessMessage = null;
     notifyListeners();
@@ -62,9 +65,9 @@ class AppController extends ChangeNotifier {
     final becameSignedIn = _prevDriveAccount == null && current != null;
     _prevDriveAccount = current;
     notifyListeners();
-    if (becameSignedIn &&
-        GoogleAuthConfig.isEmailAllowed(current.email) &&
-        !loading) {
+    // Any browser (Chrome / Safari / Firefox): as soon as Google is live, sync.
+    // Do not skip when loading — One Tap often finishes after init started.
+    if (becameSignedIn && GoogleAuthConfig.isEmailAllowed(current.email)) {
       unawaited(_afterGoogleSignIn());
     }
   }
@@ -75,22 +78,23 @@ class AppController extends ChangeNotifier {
     try {
       loginSuccessMessage = 'Signed in as ${driveSync.email}';
       notifyListeners();
-      // Prefer silent Drive token; fall back to one user gesture popup.
-      await _loadVaultAndSync(interactive: false);
+      // Every login from any browser: pull/push Drive immediately.
+      await _loadVaultAndSync(interactive: true);
       if (driveSync.lastError != null) {
         driveSync.clearLastError();
-        await _loadVaultAndSync(interactive: true);
+        await _loadVaultAndSync(interactive: false);
       }
       driveSync.clearLastError();
+      needsCloudPull = false;
       _startPeriodicSync();
     } catch (e) {
-      // Still enter the app with local data if Drive popup was blocked.
       if (!vaultLoaded) {
         try {
-          await _loadVaultAndSync(interactive: false);
+          await _loadVaultFromDb();
         } catch (_) {}
       }
       loginSuccessMessage = 'Signed in as ${driveSync.email}';
+      needsCloudPull = true;
       _startPeriodicSync();
     } finally {
       loading = false;
@@ -147,13 +151,32 @@ class AppController extends ChangeNotifier {
         return;
       }
 
-      // Do not load or show vault data until an allowlisted user is signed in
-      // (live Google session or resumed local session after refresh).
+      // Local session and/or live Google — never show the vault to strangers.
       if (!isAuthenticated) {
         return;
       }
 
-      await _loadVaultAndSync(interactive: false);
+      // Wherever you open the app: connect Google + sync Drive before settling.
+      if (!driveSync.isSignedIn) {
+        await driveSync.restoreGoogleSession(
+          timeout: const Duration(seconds: 20),
+        );
+      }
+
+      if (driveSync.isSignedIn) {
+        // Prefer interactive once so Safari/Firefox can grant Drive in this gesture window.
+        try {
+          await _loadVaultAndSync(interactive: true);
+        } catch (_) {
+          await _loadVaultAndSync(interactive: false);
+        }
+        final count = await _transactions.countAll();
+        needsCloudPull = count == 0;
+      } else {
+        await _loadVaultFromDb();
+        needsCloudPull = true;
+      }
+
       _startPeriodicSync();
     } catch (e) {
       error = e.toString();
@@ -196,11 +219,16 @@ class AppController extends ChangeNotifier {
     }
   }
 
-  Future<void> _loadVaultAndSync({required bool interactive}) async {
+  Future<void> _loadVaultFromDb() async {
     settings = await _settingsRepo.load();
     categories = await _categories.getAll();
     await refreshDashboard();
     await refreshTransactions();
+    vaultLoaded = true;
+  }
+
+  Future<void> _loadVaultAndSync({required bool interactive}) async {
+    await _loadVaultFromDb();
 
     var count = await _transactions.countAll();
     if (count == 0 && !restoreOfferDismissed) {
@@ -210,6 +238,11 @@ class AppController extends ChangeNotifier {
       }
     }
 
+    if (!driveSync.isSignedIn) {
+      needsCloudPull = true;
+      return;
+    }
+
     final remoteJson = await driveSync.reconcile(
       buildBackupJson: _backup.createBackupJson,
       localTransactionCount: count,
@@ -217,10 +250,7 @@ class AppController extends ChangeNotifier {
     );
     if (remoteJson != null) {
       await _backup.restoreBackupJson(remoteJson);
-      settings = await _settingsRepo.load();
-      categories = await _categories.getAll();
-      await refreshDashboard();
-      await refreshTransactions();
+      await _loadVaultFromDb();
       count = await _transactions.countAll();
     } else if (interactive && count > 0) {
       await driveSync.pushBackup(
@@ -232,6 +262,7 @@ class AppController extends ChangeNotifier {
     if (count > 0) {
       _persistSurvival();
     }
+    needsCloudPull = false;
     vaultLoaded = true;
   }
 
@@ -280,6 +311,9 @@ class AppController extends ChangeNotifier {
       restoreBackup: restoreBackup,
       localTransactionCount: count,
     );
+    final after = await _transactions.countAll();
+    needsCloudPull = after == 0 && driveSync.needsGoogleReconnect;
+    notifyListeners();
   }
 
   Future<void> refreshDashboard() async {

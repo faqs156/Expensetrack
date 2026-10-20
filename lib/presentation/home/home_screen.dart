@@ -56,6 +56,56 @@ class HomeScreen extends StatelessWidget {
                     color: theme.colorScheme.onSurface.withValues(alpha: 0.55),
                   ),
                 ),
+                if (app.needsCloudPull || app.driveSync.needsGoogleReconnect) ...[
+                  const SizedBox(height: 12),
+                  Material(
+                    color: theme.colorScheme.secondaryContainer,
+                    borderRadius: BorderRadius.circular(12),
+                    child: Padding(
+                      padding: const EdgeInsets.fromLTRB(12, 10, 8, 10),
+                      child: Row(
+                        children: [
+                          Icon(
+                            Icons.cloud_download_outlined,
+                            color: theme.colorScheme.onSecondaryContainer,
+                          ),
+                          const SizedBox(width: 10),
+                          Expanded(
+                            child: Text(
+                              'Syncing your data… tap Sync if nothing appears.',
+                              style: theme.textTheme.bodyMedium?.copyWith(
+                                color: theme.colorScheme.onSecondaryContainer,
+                              ),
+                            ),
+                          ),
+                          TextButton(
+                            onPressed: () async {
+                              try {
+                                await context
+                                    .read<AppController>()
+                                    .syncGoogleDriveNow();
+                                if (context.mounted) {
+                                  ScaffoldMessenger.of(context).showSnackBar(
+                                    const SnackBar(
+                                      content: Text('Sync finished'),
+                                    ),
+                                  );
+                                }
+                              } catch (e) {
+                                if (context.mounted) {
+                                  ScaffoldMessenger.of(context).showSnackBar(
+                                    SnackBar(content: Text('$e')),
+                                  );
+                                }
+                              }
+                            },
+                            child: const Text('Sync'),
+                          ),
+                        ],
+                      ),
+                    ),
+                  ),
+                ],
                 const SizedBox(height: 16),
                 Row(
                   children: [

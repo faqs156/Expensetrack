@@ -2,7 +2,7 @@ import 'dart:async';
 import 'dart:convert';
 
 import 'package:extension_google_sign_in_as_googleapis_auth/extension_google_sign_in_as_googleapis_auth.dart';
-import 'package:flutter/foundation.dart';
+import 'package:flutter/foundation.dart' show ChangeNotifier;
 import 'package:google_sign_in/google_sign_in.dart';
 import 'package:googleapis/drive/v3.dart' as drive;
 import 'package:shared_preferences/shared_preferences.dart';
@@ -79,27 +79,36 @@ class GoogleDriveSyncService extends ChangeNotifier {
       notifyListeners();
     });
 
-    // Web: attemptLightweightAuthentication opens Google One Tap / account
-    // chooser on every refresh. Skip it when we already have a local session
-    // (lastKnownEmail) so refresh stays quiet. Native can still restore silently.
-    final hasLocalSession = lastKnownEmail != null &&
-        GoogleAuthConfig.isEmailAllowed(lastKnownEmail);
-    if (!kIsWeb || !hasLocalSession) {
-      try {
-        final restored = await _signIn.attemptLightweightAuthentication();
-        if (restored != null) {
-          await _acceptOrRejectUser(restored);
-        }
-      } catch (_) {
-        // User not signed in yet — fine.
-      }
-    }
+    // Always try to restore Google so Drive can sync on every open / login
+    // (Chrome, Safari, Firefox — One Tap / FedCM timing differs by browser).
+    await restoreGoogleSession(timeout: const Duration(seconds: 20));
 
     _initialized = true;
     if (account == null) {
       status = DriveSyncStatus.signedOut;
     }
     notifyListeners();
+  }
+
+  /// One Tap / silent restore. Returns true when a live Google session exists.
+  Future<bool> restoreGoogleSession({
+    Duration timeout = const Duration(seconds: 12),
+  }) async {
+    if (account != null) return true;
+    try {
+      final restored = await _signIn.attemptLightweightAuthentication();
+      if (restored != null) {
+        await _acceptOrRejectUser(restored);
+      }
+    } catch (_) {
+      // Continue waiting — web One Tap completes via authenticationEvents.
+    }
+
+    final deadline = DateTime.now().add(timeout);
+    while (account == null && DateTime.now().isBefore(deadline)) {
+      await Future<void>.delayed(const Duration(milliseconds: 200));
+    }
+    return account != null;
   }
 
   /// Allowlisted email from this browser (survives refresh even if Google UI did not).
@@ -344,8 +353,11 @@ class GoogleDriveSyncService extends ChangeNotifier {
           localUpdatedAt ?? DateTime.fromMillisecondsSinceEpoch(0);
 
       if (remote == null) {
-        await pushBackup(localJson, interactive: interactive);
-        _hasPendingPush = false;
+        // Never upload an empty vault as the first Drive file if we have nothing.
+        if (localTransactionCount > 0 || _hasPendingPush) {
+          await pushBackup(localJson, interactive: interactive);
+          _hasPendingPush = false;
+        }
         lastError = null;
         status = DriveSyncStatus.idle;
         notifyListeners();
@@ -353,6 +365,19 @@ class GoogleDriveSyncService extends ChangeNotifier {
       }
 
       final remoteUpdated = remote.updatedAt;
+      final remoteHasTx = _remoteHasTransactions(remote.json);
+
+      // Empty local + Drive has data → always pull (fixes Safari / new browser).
+      if (localTransactionCount == 0 && remoteHasTx) {
+        await setLocalUpdatedFromRemote(remoteUpdated);
+        await _markSynced();
+        _hasPendingPush = false;
+        lastError = null;
+        status = DriveSyncStatus.idle;
+        notifyListeners();
+        return remote.json;
+      }
+
       // Remote strictly newer → pull (unless we have unsynced local edits).
       if (remoteUpdated.isAfter(localUpdated) && !_hasPendingPush) {
         await setLocalUpdatedFromRemote(remoteUpdated);
@@ -363,8 +388,17 @@ class GoogleDriveSyncService extends ChangeNotifier {
         return remote.json;
       }
 
-      // Local newer, equal, or pending edits → upload full vault
-      // (categories, transactions, budgets, settings).
+      // Local newer, equal, or pending edits → upload full vault.
+      // Do not upload a completely empty vault over a non-empty Drive copy.
+      if (localTransactionCount == 0 && remoteHasTx) {
+        await setLocalUpdatedFromRemote(remoteUpdated);
+        await _markSynced();
+        lastError = null;
+        status = DriveSyncStatus.idle;
+        notifyListeners();
+        return remote.json;
+      }
+
       if (_hasPendingPush ||
           !remoteUpdated.isAfter(localUpdated) ||
           localTransactionCount > 0) {
@@ -451,9 +485,20 @@ class GoogleDriveSyncService extends ChangeNotifier {
     if (remoteJson != null) {
       await restoreBackup(remoteJson);
       _hasPendingPush = false;
-    } else {
-      // Make Drive match this device completely (budgets + transactions + …).
+    } else if (localTransactionCount > 0 || _hasPendingPush) {
+      // Upload only when this device has something to save.
       await flushPendingPush(interactive: true, force: true);
+    }
+  }
+
+  bool _remoteHasTransactions(String json) {
+    try {
+      final decoded = jsonDecode(json);
+      if (decoded is! Map) return false;
+      final txs = decoded['transactions'];
+      return txs is List && txs.isNotEmpty;
+    } catch (_) {
+      return false;
     }
   }
 
