@@ -42,10 +42,10 @@ class AppController extends ChangeNotifier {
 
   GoogleSignInAccount? _prevDriveAccount;
 
-  /// True only for an allowlisted signed-in Google account.
+  /// Allowlisted user: live Google session **or** resumed local session after refresh.
+  /// (Web Google One Tap otherwise re-prompts on every reload.)
   bool get isAuthenticated =>
       GoogleAuthConfig.isConfigured &&
-      driveSync.isSignedIn &&
       GoogleAuthConfig.isEmailAllowed(driveSync.email);
 
   /// Shown once after a successful login (UI clears it).
@@ -85,6 +85,7 @@ class AppController extends ChangeNotifier {
       loginSuccessMessage =
           'Signed in as ${driveSync.email}. Your data is up to date.';
       driveSync.clearLastError();
+      _startPeriodicSync();
     } catch (e) {
       // Still enter the app with local data if Drive popup was blocked.
       if (!vaultLoaded) {
@@ -95,7 +96,8 @@ class AppController extends ChangeNotifier {
       loginSuccessMessage =
           'Signed in as ${driveSync.email}. '
           'If sync did not finish, open Settings → Sync now '
-          '(allow popups if Safari asks).';
+          '(allow popups if the browser asks).';
+      _startPeriodicSync();
     } finally {
       loading = false;
       notifyListeners();
@@ -153,17 +155,52 @@ class AppController extends ChangeNotifier {
         return;
       }
 
-      // Do not load or show vault data until an allowlisted user is signed in.
+      // Do not load or show vault data until an allowlisted user is signed in
+      // (live Google session or resumed local session after refresh).
       if (!isAuthenticated) {
         return;
       }
 
       await _loadVaultAndSync(interactive: false);
+      _startPeriodicSync();
     } catch (e) {
       error = e.toString();
     } finally {
       loading = false;
       notifyListeners();
+    }
+  }
+
+  Timer? _periodicSyncTimer;
+
+  void _startPeriodicSync() {
+    _periodicSyncTimer?.cancel();
+    _periodicSyncTimer = Timer.periodic(
+      GoogleAuthConfig.periodicSyncInterval,
+      (_) => unawaited(_periodicSyncTick()),
+    );
+  }
+
+  Future<void> _periodicSyncTick() async {
+    if (!isAuthenticated || !driveSync.isSignedIn) return;
+    if (driveSync.status == DriveSyncStatus.syncing) return;
+    try {
+      final count = await _transactions.countAll();
+      final remoteJson = await driveSync.reconcile(
+        buildBackupJson: _backup.createBackupJson,
+        localTransactionCount: count,
+        interactive: false,
+      );
+      if (remoteJson != null) {
+        await _backup.restoreBackupJson(remoteJson);
+        settings = await _settingsRepo.load();
+        categories = await _categories.getAll();
+        await refreshDashboard();
+        await refreshTransactions();
+        notifyListeners();
+      }
+    } catch (_) {
+      // Keep local vault; next Sync now / interval can retry.
     }
   }
 
@@ -231,6 +268,8 @@ class AppController extends ChangeNotifier {
   }
 
   Future<void> signOutGoogle() async {
+    _periodicSyncTimer?.cancel();
+    _periodicSyncTimer = null;
     await driveSync.signOut();
     vaultLoaded = false;
     loginSuccessMessage = null;
@@ -456,7 +495,9 @@ class AppController extends ChangeNotifier {
   }
 
   @override
+  @override
   void dispose() {
+    _periodicSyncTimer?.cancel();
     driveSync.removeListener(_onDriveSyncChanged);
     driveSync.dispose();
     _survival.dispose();

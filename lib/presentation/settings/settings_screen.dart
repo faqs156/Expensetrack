@@ -9,11 +9,15 @@ import '../../platform/file_actions.dart';
 import '../../state/app_controller.dart';
 import 'budget_screen.dart';
 import 'categories_screen.dart';
+import 'google_sign_in_button.dart';
 
 class SettingsScreen extends StatelessWidget {
   const SettingsScreen({super.key});
 
   String _driveSyncSubtitle(AppController app) {
+    if (app.driveSync.needsGoogleReconnect) {
+      return 'Logged in locally — reconnect Google to sync Drive';
+    }
     final last = app.driveSync.lastSyncedAt;
     if (app.driveSync.status == DriveSyncStatus.syncing) {
       return 'Syncing with Google Drive…';
@@ -312,6 +316,29 @@ class SettingsScreen extends StatelessWidget {
           title: Text(app.driveSync.email ?? 'Signed in'),
           subtitle: Text(_driveSyncSubtitle(app)),
         ),
+        if (app.driveSync.needsGoogleReconnect) ...[
+          ListTile(
+            contentPadding: EdgeInsets.zero,
+            leading: Icon(
+              Icons.link_off,
+              color: theme.colorScheme.tertiary,
+            ),
+            title: const Text('Reconnect Google for Drive sync'),
+            subtitle: const Text(
+              'You stayed logged in after refresh. Use the Google button below '
+              'once this session (Chrome may ask which account).',
+            ),
+          ),
+          Align(
+            alignment: Alignment.centerLeft,
+            child: GoogleSignInButton(
+              onPressed: () {
+                // Web GIS owns the click; sync runs via auth → _afterGoogleSignIn.
+              },
+            ),
+          ),
+          const SizedBox(height: 8),
+        ],
         ListTile(
           contentPadding: EdgeInsets.zero,
           leading: app.driveSync.status == DriveSyncStatus.syncing
@@ -322,8 +349,13 @@ class SettingsScreen extends StatelessWidget {
                 )
               : const Icon(Icons.sync),
           title: const Text('Sync now'),
-          subtitle: const Text('Refresh vault from Google Drive'),
-          onTap: app.driveSync.status == DriveSyncStatus.syncing
+          subtitle: Text(
+            app.driveSync.needsGoogleReconnect
+                ? 'Reconnect with the Google button above first'
+                : 'Refresh vault from Google Drive (also every 5 minutes while open)',
+          ),
+          onTap: app.driveSync.status == DriveSyncStatus.syncing ||
+                  app.driveSync.needsGoogleReconnect
               ? null
               : () => _syncNow(context),
         ),

@@ -59,4 +59,7 @@ class GoogleAuthConfig {
   ];
 
   static const syncFileName = 'expense_track_sync.json';
+
+  /// How often to pull/push Drive while the app is open and Google is connected.
+  static const periodicSyncInterval = Duration(minutes: 5);
 }

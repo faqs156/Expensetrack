@@ -39,8 +39,9 @@ class LoginScreen extends StatelessWidget {
                   ),
                   const SizedBox(height: 8),
                   Text(
-                    'Sign in with an allowed Google account to open your vault. '
-                    'Other accounts cannot access this app.',
+                    'Sign in once with an allowed Google account. '
+                    'This browser will remember you after refresh; '
+                    'other Google accounts cannot open the vault.',
                     textAlign: TextAlign.center,
                     style: theme.textTheme.bodyMedium?.copyWith(
                       color: theme.colorScheme.onSurfaceVariant,

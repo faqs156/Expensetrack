@@ -75,13 +75,20 @@ class GoogleDriveSyncService extends ChangeNotifier {
       notifyListeners();
     });
 
-    try {
-      final restored = await _signIn.attemptLightweightAuthentication();
-      if (restored != null) {
-        await _acceptOrRejectUser(restored);
+    // Web: attemptLightweightAuthentication opens Google One Tap / account
+    // chooser on every refresh. Skip it when we already have a local session
+    // (lastKnownEmail) so refresh stays quiet. Native can still restore silently.
+    final hasLocalSession = lastKnownEmail != null &&
+        GoogleAuthConfig.isEmailAllowed(lastKnownEmail);
+    if (!kIsWeb || !hasLocalSession) {
+      try {
+        final restored = await _signIn.attemptLightweightAuthentication();
+        if (restored != null) {
+          await _acceptOrRejectUser(restored);
+        }
+      } catch (_) {
+        // User not signed in yet — fine.
       }
-    } catch (_) {
-      // User not signed in yet — fine.
     }
 
     _initialized = true;
@@ -90,6 +97,13 @@ class GoogleDriveSyncService extends ChangeNotifier {
     }
     notifyListeners();
   }
+
+  /// Allowlisted email from this browser (survives refresh even if Google UI did not).
+  bool get hasLocalSession =>
+      lastKnownEmail != null && GoogleAuthConfig.isEmailAllowed(lastKnownEmail);
+
+  /// Google identity is live (needed for Drive API). Local session alone is not enough.
+  bool get needsGoogleReconnect => hasLocalSession && account == null;
 
   Future<void> _acceptOrRejectUser(GoogleSignInAccount user) async {
     if (!GoogleAuthConfig.isEmailAllowed(user.email)) {
@@ -191,7 +205,10 @@ class GoogleDriveSyncService extends ChangeNotifier {
     _pushDebounce?.cancel();
     await _signIn.signOut();
     account = null;
+    lastKnownEmail = null;
     status = DriveSyncStatus.signedOut;
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.remove('drive_sync_last_email');
     notifyListeners();
   }
 
