@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="utf-8"?>
+<full-backup-content>
+    <!-- Include SQLite DB + settings so Google Auto Backup can restore after reinstall. -->
+    <include domain="database" path="expense_track.db"/>
+    <include domain="database" path="expense_track.db-journal"/>
+    <include domain="database" path="expense_track.db-wal"/>
+    <include domain="database" path="expense_track.db-shm"/>
+    <include domain="sharedpref" path="."/>
+    <exclude domain="file" path="flutter_assets/"/>
+</full-backup-content>
