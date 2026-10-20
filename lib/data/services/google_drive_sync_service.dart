@@ -32,8 +32,12 @@ class GoogleDriveSyncService extends ChangeNotifier {
   bool get ready => _initialized;
 
   Timer? _pushDebounce;
+  Future<String> Function()? _pendingBackupBuilder;
+  bool _hasPendingPush = false;
+
   bool get isSignedIn => account != null;
   String? get email => account?.email ?? lastKnownEmail;
+  bool get hasPendingPush => _hasPendingPush;
 
   Future<void> initialize() async {
     if (_initialized) return;
@@ -124,6 +128,10 @@ class GoogleDriveSyncService extends ChangeNotifier {
     await _rememberSignedIn(user.email);
     await dismissPrompt();
     notifyListeners();
+    // Flush edits made while Google was disconnected (after refresh).
+    if (_hasPendingPush && _pendingBackupBuilder != null) {
+      unawaited(flushPendingPush(interactive: false));
+    }
   }
 
   void clearLastError() {
@@ -178,19 +186,7 @@ class GoogleDriveSyncService extends ChangeNotifier {
       );
     }
     lastError = null;
-    if (_signIn.supportsAuthenticate()) {
-      final user = await _signIn.authenticate(
-        scopeHint: GoogleAuthConfig.signInScopeHint,
-      );
-      await _acceptOrRejectUser(user);
-      if (account == null) {
-        throw StateError(lastError ?? 'Google account not allowed');
-      }
-    } else {
-      throw StateError(
-        'Use the Google Sign-In button (web requires the official button).',
-      );
-    }
+    await ensureGoogleConnected();
     try {
       await _ensureDriveAuthorized(interactive: true);
     } catch (e) {
@@ -199,6 +195,65 @@ class GoogleDriveSyncService extends ChangeNotifier {
       // Stay signed in — vault UI still works offline.
     }
     notifyListeners();
+  }
+
+  /// Restores a live Google session (needed for Drive). Safe to call from Sync now.
+  ///
+  /// Home can use [hasLocalSession] without this; Drive API cannot.
+  Future<void> ensureGoogleConnected({
+    Duration timeout = const Duration(seconds: 90),
+  }) async {
+    if (account != null) return;
+    if (!GoogleAuthConfig.isConfigured) {
+      throw StateError('Google login is not configured in this build.');
+    }
+    lastError = null;
+
+    if (_signIn.supportsAuthenticate()) {
+      final user = await _signIn.authenticate(
+        scopeHint: GoogleAuthConfig.signInScopeHint,
+      );
+      await _acceptOrRejectUser(user);
+      if (account == null) {
+        throw StateError(lastError ?? 'Google account not allowed');
+      }
+      return;
+    }
+
+    // Web: One Tap / FedCM (only when user taps Sync — not on every refresh).
+    final done = Completer<void>();
+    late final StreamSubscription<GoogleSignInAuthenticationEvent> sub;
+    sub = _signIn.authenticationEvents.listen((event) {
+      switch (event) {
+        case GoogleSignInAuthenticationEventSignIn():
+          if (!done.isCompleted) done.complete();
+        case GoogleSignInAuthenticationEventSignOut():
+          break;
+      }
+    }, onError: (Object e, StackTrace st) {
+      if (!done.isCompleted) {
+        done.completeError(e, st);
+      }
+    });
+
+    try {
+      await _signIn.attemptLightweightAuthentication();
+      await done.future.timeout(
+        timeout,
+        onTimeout: () {
+          throw StateError(
+            'Google sign-in timed out. Pick your allowlisted account when Chrome asks, '
+            'then tap Sync now again.',
+          );
+        },
+      );
+    } finally {
+      await sub.cancel();
+    }
+
+    if (account == null) {
+      throw StateError(lastError ?? 'Google account not allowed');
+    }
   }
 
   Future<void> signOut() async {
@@ -212,22 +267,44 @@ class GoogleDriveSyncService extends ChangeNotifier {
     notifyListeners();
   }
 
-  /// Mark local data dirty and schedule a silent upload when signed in.
+  /// Mark local vault dirty and upload full snapshot (txs, budgets, etc.) to Drive.
   void schedulePush(Future<String> Function() buildBackupJson) {
+    _pendingBackupBuilder = buildBackupJson;
+    _hasPendingPush = true;
     unawaited(markLocalChanged());
-    if (!isSignedIn) return;
+    if (!isSignedIn) {
+      // Local session can keep editing; Sync now / reconnect will flush.
+      notifyListeners();
+      return;
+    }
     _pushDebounce?.cancel();
-    _pushDebounce = Timer(const Duration(seconds: 3), () async {
-      try {
-        await pushBackup(await buildBackupJson(), interactive: false);
-      } catch (e) {
-        // Silent background failure — user can tap Sync now (re-auth if needed).
+    _pushDebounce = Timer(const Duration(seconds: 2), () {
+      unawaited(flushPendingPush(interactive: false));
+    });
+  }
+
+  /// Upload the full local vault if there are pending edits (or [force]).
+  Future<void> flushPendingPush({
+    bool interactive = false,
+    bool force = false,
+  }) async {
+    final builder = _pendingBackupBuilder;
+    if (!isSignedIn) return;
+    if (!force && !_hasPendingPush) return;
+    if (builder == null) return;
+    try {
+      await pushBackup(await builder(), interactive: interactive);
+      _hasPendingPush = false;
+    } catch (e) {
+      if (!interactive) {
         lastError =
-            'Auto-sync paused. Tap Sync now to reconnect Google Drive.';
+            'Auto-sync paused. Tap Sync now to upload budgets & transactions.';
         status = DriveSyncStatus.error;
         notifyListeners();
+      } else {
+        rethrow;
       }
-    });
+    }
   }
 
   Future<void> markLocalChanged() async {
@@ -271,26 +348,32 @@ class GoogleDriveSyncService extends ChangeNotifier {
           localUpdatedAt ?? DateTime.fromMillisecondsSinceEpoch(0);
 
       if (remote == null) {
-        if (localTransactionCount > 0 || localJson.trim().isNotEmpty) {
-          await pushBackup(localJson, interactive: interactive);
-        }
+        await pushBackup(localJson, interactive: interactive);
+        _hasPendingPush = false;
+        lastError = null;
         status = DriveSyncStatus.idle;
         notifyListeners();
         return null;
       }
 
       final remoteUpdated = remote.updatedAt;
-      if (remoteUpdated.isAfter(localUpdated.add(const Duration(seconds: 1)))) {
+      // Remote strictly newer → pull (unless we have unsynced local edits).
+      if (remoteUpdated.isAfter(localUpdated) && !_hasPendingPush) {
         await setLocalUpdatedFromRemote(remoteUpdated);
         await _markSynced();
+        lastError = null;
         status = DriveSyncStatus.idle;
         notifyListeners();
         return remote.json;
       }
 
-      if (localUpdated.isAfter(remoteUpdated.add(const Duration(seconds: 1))) ||
-          localTransactionCount > 0 && remote.json.trim().isEmpty) {
+      // Local newer, equal, or pending edits → upload full vault
+      // (categories, transactions, budgets, settings).
+      if (_hasPendingPush ||
+          !remoteUpdated.isAfter(localUpdated) ||
+          localTransactionCount > 0) {
         await pushBackup(localJson, interactive: interactive);
+        _hasPendingPush = false;
       } else {
         await _markSynced();
       }
@@ -344,6 +427,7 @@ class GoogleDriveSyncService extends ChangeNotifier {
         );
       }
       await _markSynced();
+      _hasPendingPush = false;
       lastError = null;
       status = DriveSyncStatus.idle;
       notifyListeners();
@@ -364,6 +448,9 @@ class GoogleDriveSyncService extends ChangeNotifier {
     required Future<void> Function(String json) restoreBackup,
     required int localTransactionCount,
   }) async {
+    // Drive needs a live Google token; home page can stay open on local session alone.
+    _pendingBackupBuilder = buildBackupJson;
+    await ensureGoogleConnected();
     final remoteJson = await reconcile(
       buildBackupJson: buildBackupJson,
       localTransactionCount: localTransactionCount,
@@ -371,6 +458,10 @@ class GoogleDriveSyncService extends ChangeNotifier {
     );
     if (remoteJson != null) {
       await restoreBackup(remoteJson);
+      _hasPendingPush = false;
+    } else {
+      // Make Drive match this device completely (budgets + transactions + …).
+      await flushPendingPush(interactive: true, force: true);
     }
   }
 

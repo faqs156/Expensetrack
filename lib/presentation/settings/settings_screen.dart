@@ -9,7 +9,6 @@ import '../../platform/file_actions.dart';
 import '../../state/app_controller.dart';
 import 'budget_screen.dart';
 import 'categories_screen.dart';
-import 'google_sign_in_button.dart';
 
 class SettingsScreen extends StatelessWidget {
   const SettingsScreen({super.key});
@@ -316,29 +315,6 @@ class SettingsScreen extends StatelessWidget {
           title: Text(app.driveSync.email ?? 'Signed in'),
           subtitle: Text(_driveSyncSubtitle(app)),
         ),
-        if (app.driveSync.needsGoogleReconnect) ...[
-          ListTile(
-            contentPadding: EdgeInsets.zero,
-            leading: Icon(
-              Icons.link_off,
-              color: theme.colorScheme.tertiary,
-            ),
-            title: const Text('Reconnect Google for Drive sync'),
-            subtitle: const Text(
-              'You stayed logged in after refresh. Use the Google button below '
-              'once this session (Chrome may ask which account).',
-            ),
-          ),
-          Align(
-            alignment: Alignment.centerLeft,
-            child: GoogleSignInButton(
-              onPressed: () {
-                // Web GIS owns the click; sync runs via auth → _afterGoogleSignIn.
-              },
-            ),
-          ),
-          const SizedBox(height: 8),
-        ],
         ListTile(
           contentPadding: EdgeInsets.zero,
           leading: app.driveSync.status == DriveSyncStatus.syncing
@@ -347,15 +323,21 @@ class SettingsScreen extends StatelessWidget {
                   height: 24,
                   child: CircularProgressIndicator(strokeWidth: 2),
                 )
-              : const Icon(Icons.sync),
+              : Icon(
+                  app.driveSync.needsGoogleReconnect
+                      ? Icons.cloud_sync_outlined
+                      : Icons.sync,
+                ),
           title: const Text('Sync now'),
           subtitle: Text(
             app.driveSync.needsGoogleReconnect
-                ? 'Reconnect with the Google button above first'
-                : 'Refresh vault from Google Drive (also every 5 minutes while open)',
+                ? 'Chrome may ask for Google once, then uploads all transactions, '
+                    'budgets, categories & settings'
+                : app.driveSync.hasPendingPush
+                    ? 'Uploading local changes to Drive…'
+                    : 'Full vault sync (also ~every 5 minutes while Google is connected)',
           ),
-          onTap: app.driveSync.status == DriveSyncStatus.syncing ||
-                  app.driveSync.needsGoogleReconnect
+          onTap: app.driveSync.status == DriveSyncStatus.syncing
               ? null
               : () => _syncNow(context),
         ),

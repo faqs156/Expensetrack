@@ -258,6 +258,7 @@ class AppController extends ChangeNotifier {
   }
 
   void _persistSurvival() {
+    // Full vault JSON: categories, transactions, budgets, settings → Drive.
     _survival.scheduleAfterChange(() => _backup.createBackupJson());
     driveSync.schedulePush(() => _backup.createBackupJson());
   }
