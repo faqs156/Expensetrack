@@ -5,7 +5,7 @@ import '../../core/google_auth_config.dart';
 import '../../state/app_controller.dart';
 import '../settings/google_sign_in_button.dart';
 
-/// Soft prompt once per browser profile asking the user to sign in for Drive sync.
+/// One-time soft prompt. Never shown again after dismiss, sign-in, or prior session.
 class GoogleSignInPromptHost extends StatefulWidget {
   const GoogleSignInPromptHost({super.key, required this.child});
 
@@ -16,73 +16,66 @@ class GoogleSignInPromptHost extends StatefulWidget {
 }
 
 class _GoogleSignInPromptHostState extends State<GoogleSignInPromptHost> {
-  var _shown = false;
+  var _scheduled = false;
 
   @override
-  void didChangeDependencies() {
-    super.didChangeDependencies();
-    if (_shown) return;
-    final app = context.read<AppController>();
-    if (!GoogleAuthConfig.isConfigured) return;
-    if (app.driveSync.isSignedIn || app.driveSync.promptDismissed) return;
-    if (app.loading) return;
-    _shown = true;
-    WidgetsBinding.instance.addPostFrameCallback((_) {
-      if (!mounted) return;
-      _showPrompt(context);
-    });
+  Widget build(BuildContext context) {
+    final app = context.watch<AppController>();
+    if (!_scheduled &&
+        !app.loading &&
+        app.driveSync.ready &&
+        GoogleAuthConfig.isConfigured &&
+        !app.driveSync.isSignedIn &&
+        !app.driveSync.promptDismissed &&
+        app.driveSync.lastKnownEmail == null) {
+      _scheduled = true;
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (!mounted) return;
+        _showPrompt(context);
+      });
+    }
+    return widget.child;
   }
 
   Future<void> _showPrompt(BuildContext context) async {
     final app = context.read<AppController>();
+    // Persist immediately so a refresh / barrier dismiss never re-prompts.
+    await app.driveSync.dismissPrompt();
+    if (!context.mounted) return;
+
     await showDialog<void>(
       context: context,
       builder: (ctx) => AlertDialog(
         title: const Text('Sync with Google Drive?'),
         content: const Text(
-          'Sign in with Google to keep the same expenses on every phone and browser '
-          'that uses this account. Data is stored in a private Drive app folder '
-          '(not visible in My Drive).\n\n'
-          'You can skip and keep data only on this device.',
+          'Sign in once with Google to keep the same expenses on every phone '
+          'and browser. You can also do this later from Settings.\n\n'
+          'You will not be asked again on this device.',
         ),
         actions: [
           TextButton(
-            onPressed: () async {
-              await app.driveSync.dismissPrompt();
-              if (ctx.mounted) Navigator.pop(ctx);
-            },
+            onPressed: () => Navigator.pop(ctx),
             child: const Text('Not now'),
           ),
-          if (app.driveSync.isSignedIn)
-            FilledButton(
-              onPressed: () => Navigator.pop(ctx),
-              child: const Text('Done'),
-            )
-          else ...[
-            if (!app.driveSync.isSignedIn)
-              Padding(
-                padding: const EdgeInsets.only(right: 8),
-                child: GoogleSignInButton(
-                  onPressed: () async {
-                    try {
-                      await app.signInWithGoogle();
-                      if (ctx.mounted) Navigator.pop(ctx);
-                    } catch (e) {
-                      if (ctx.mounted) {
-                        ScaffoldMessenger.of(context).showSnackBar(
-                          SnackBar(content: Text('Sign-in failed: $e')),
-                        );
-                      }
-                    }
-                  },
-                ),
-              ),
-          ],
+          Padding(
+            padding: const EdgeInsets.only(right: 8),
+            child: GoogleSignInButton(
+              onPressed: () async {
+                try {
+                  await app.signInWithGoogle();
+                  if (ctx.mounted) Navigator.pop(ctx);
+                } catch (e) {
+                  if (context.mounted) {
+                    ScaffoldMessenger.of(context).showSnackBar(
+                      SnackBar(content: Text('Sign-in failed: $e')),
+                    );
+                  }
+                }
+              },
+            ),
+          ),
         ],
       ),
     );
   }
-
-  @override
-  Widget build(BuildContext context) => widget.child;
 }

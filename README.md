@@ -48,10 +48,15 @@ export GOOGLE_CLIENT_ID='xxxx.apps.googleusercontent.com'
 ./tool/deploy_web.sh
 ```
 
-### GitHub Actions secret
+### GitHub Actions secrets (Repository secrets)
 
-Repo → **Settings → Secrets → Actions** → `GOOGLE_CLIENT_ID` = your web client ID.  
-The Pages workflow injects it into the build.
+| Secret | Example | Purpose |
+|--------|---------|---------|
+| `GOOGLE_CLIENT_ID` | `xxxx.apps.googleusercontent.com` | OAuth web client |
+| `GOOGLE_ALLOWED_EMAILS` | `you@gmail.com,partner@gmail.com` | Only these accounts can sign in |
+
+Comma-separated, no spaces required (spaces are trimmed). Case-insensitive.  
+If `GOOGLE_ALLOWED_EMAILS` is missing/empty, **nobody** can use Google sync.
 
 After sign-in, ExpenseTrack stores `expense_track_sync.json` in Drive **appDataFolder** (hidden from My Drive). Same account on another device pulls that file.
 

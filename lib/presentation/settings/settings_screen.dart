@@ -329,8 +329,7 @@ class SettingsScreen extends StatelessWidget {
             leading: const Icon(Icons.cloud_off_outlined),
             title: const Text('Google sync not configured'),
             subtitle: const Text(
-              'Build with --dart-define=GOOGLE_CLIENT_ID=… and enable '
-              'Drive API (see README).',
+              'Set GOOGLE_CLIENT_ID and GOOGLE_ALLOWED_EMAILS (see README).',
             ),
           )
         else ...[

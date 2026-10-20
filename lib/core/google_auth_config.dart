@@ -1,16 +1,39 @@
-/// Google OAuth Web client ID for Sign-In + Drive app-data sync.
+/// Google OAuth + allowlist for Sign-In / Drive sync.
 ///
-/// Pass at build/run time:
-///   flutter build web --dart-define=GOOGLE_CLIENT_ID=xxx.apps.googleusercontent.com
-///
-/// Also add the same value as a meta tag in `web/index.html` (see README).
+/// Build/run:
+/// ```
+/// flutter build web \
+///   --dart-define=GOOGLE_CLIENT_ID=xxx.apps.googleusercontent.com \
+///   --dart-define=GOOGLE_ALLOWED_EMAILS=you@gmail.com,other@gmail.com
+/// ```
 class GoogleAuthConfig {
   static const clientId = String.fromEnvironment(
     'GOOGLE_CLIENT_ID',
     defaultValue: '',
   );
 
-  static bool get isConfigured => clientId.trim().isNotEmpty;
+  /// Comma-separated Gmail addresses (case-insensitive).
+  static const allowedEmailsRaw = String.fromEnvironment(
+    'GOOGLE_ALLOWED_EMAILS',
+    defaultValue: '',
+  );
+
+  static bool get isConfigured =>
+      clientId.trim().isNotEmpty && allowedEmails.isNotEmpty;
+
+  /// Normalized allowlist (lowercase, trimmed, non-empty).
+  static Set<String> get allowedEmails {
+    return allowedEmailsRaw
+        .split(',')
+        .map((e) => e.trim().toLowerCase())
+        .where((e) => e.isNotEmpty && e.contains('@'))
+        .toSet();
+  }
+
+  static bool isEmailAllowed(String? email) {
+    if (email == null || email.trim().isEmpty) return false;
+    return allowedEmails.contains(email.trim().toLowerCase());
+  }
 
   /// Drive scope: hidden app-data folder (not visible in the user's My Drive).
   static const driveScopes = <String>[

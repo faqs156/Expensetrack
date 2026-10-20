@@ -7,6 +7,7 @@ cd "$ROOT"
 
 BASE_HREF="${BASE_HREF:-/Expensetrack/}"
 GOOGLE_CLIENT_ID="${GOOGLE_CLIENT_ID:-}"
+GOOGLE_ALLOWED_EMAILS="${GOOGLE_ALLOWED_EMAILS:-}"
 
 # Flutter hooks_runner drops DEVELOPER_DIR; put our xcrun shim first on PATH so
 # objective_c native-asset builds use Command Line Tools (no Xcode license).
@@ -21,6 +22,12 @@ if [[ -n "$GOOGLE_CLIENT_ID" ]]; then
   rm -f "$ROOT/web/index.html.bak"
 else
   echo "==> GOOGLE_CLIENT_ID unset — Drive sync UI will show “not configured”"
+fi
+
+if [[ -n "$GOOGLE_ALLOWED_EMAILS" ]]; then
+  echo "==> GOOGLE_ALLOWED_EMAILS set (${GOOGLE_ALLOWED_EMAILS//,/; } )"
+else
+  echo "==> GOOGLE_ALLOWED_EMAILS unset — no Google accounts can sign in"
 fi
 
 echo "==> pub get"
@@ -41,6 +48,9 @@ echo "==> build web (base-href=$BASE_HREF; offline via web/offline_sw.js)"
 DEFINE_ARGS=()
 if [[ -n "$GOOGLE_CLIENT_ID" ]]; then
   DEFINE_ARGS+=(--dart-define="GOOGLE_CLIENT_ID=$GOOGLE_CLIENT_ID")
+fi
+if [[ -n "$GOOGLE_ALLOWED_EMAILS" ]]; then
+  DEFINE_ARGS+=(--dart-define="GOOGLE_ALLOWED_EMAILS=$GOOGLE_ALLOWED_EMAILS")
 fi
 flutter build web --release \
   --base-href "$BASE_HREF" \

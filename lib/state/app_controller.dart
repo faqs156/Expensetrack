@@ -52,15 +52,20 @@ class AppController extends ChangeNotifier {
 
   Future<void> _afterGoogleSignIn() async {
     try {
+      await driveSync.dismissPrompt();
       final count = await _transactions.countAll();
       final remoteJson = await driveSync.reconcile(
         buildBackupJson: _backup.createBackupJson,
         localTransactionCount: count,
+        interactive: true,
       );
       if (remoteJson != null) {
         await restoreBackup(remoteJson);
       } else if (count > 0) {
-        await driveSync.pushBackup(await _backup.createBackupJson());
+        await driveSync.pushBackup(
+          await _backup.createBackupJson(),
+          interactive: true,
+        );
       }
     } catch (_) {
       // User can tap Sync now; local data remains usable.
@@ -123,21 +128,19 @@ class AppController extends ChangeNotifier {
       }
 
       if (driveSync.isSignedIn) {
-        try {
-          final remoteJson = await driveSync.reconcile(
-            buildBackupJson: _backup.createBackupJson,
-            localTransactionCount: count,
-          );
-          if (remoteJson != null) {
-            await _backup.restoreBackupJson(remoteJson);
-            settings = await _settingsRepo.load();
-            categories = await _categories.getAll();
-            await refreshDashboard();
-            await refreshTransactions();
-            count = await _transactions.countAll();
-          }
-        } catch (_) {
-          // Offline or token expired — local data still works.
+        // Silent only — never pop Google UI on every app open.
+        final remoteJson = await driveSync.reconcile(
+          buildBackupJson: _backup.createBackupJson,
+          localTransactionCount: count,
+          interactive: false,
+        );
+        if (remoteJson != null) {
+          await _backup.restoreBackupJson(remoteJson);
+          settings = await _settingsRepo.load();
+          categories = await _categories.getAll();
+          await refreshDashboard();
+          await refreshTransactions();
+          count = await _transactions.countAll();
         }
       }
 

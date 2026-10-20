@@ -26,15 +26,20 @@ class GoogleDriveSyncService extends ChangeNotifier {
   DateTime? lastSyncedAt;
   DateTime? localUpdatedAt;
   bool promptDismissed = false;
+  String? lastKnownEmail;
+
+  /// True after [initialize] finished (including silent auth attempt).
+  bool get ready => _initialized;
 
   Timer? _pushDebounce;
   bool get isSignedIn => account != null;
-  String? get email => account?.email;
+  String? get email => account?.email ?? lastKnownEmail;
 
   Future<void> initialize() async {
     if (_initialized) return;
     final prefs = await SharedPreferences.getInstance();
     promptDismissed = prefs.getBool('drive_sync_prompt_dismissed') ?? false;
+    lastKnownEmail = prefs.getString('drive_sync_last_email');
     final localMs = prefs.getInt('drive_sync_local_updated_ms');
     if (localMs != null) {
       localUpdatedAt = DateTime.fromMillisecondsSinceEpoch(localMs, isUtc: true);
@@ -55,14 +60,12 @@ class GoogleDriveSyncService extends ChangeNotifier {
     _authSub = _signIn.authenticationEvents.listen((event) {
       switch (event) {
         case GoogleSignInAuthenticationEventSignIn():
-          account = event.user;
-          status = DriveSyncStatus.idle;
-          lastError = null;
+          unawaited(_acceptOrRejectUser(event.user));
         case GoogleSignInAuthenticationEventSignOut():
           account = null;
           status = DriveSyncStatus.signedOut;
+          notifyListeners();
       }
-      notifyListeners();
     }, onError: (Object e) {
       lastError = e.toString();
       status = DriveSyncStatus.error;
@@ -70,7 +73,10 @@ class GoogleDriveSyncService extends ChangeNotifier {
     });
 
     try {
-      await _signIn.attemptLightweightAuthentication();
+      final restored = await _signIn.attemptLightweightAuthentication();
+      if (restored != null) {
+        await _acceptOrRejectUser(restored);
+      }
     } catch (_) {
       // User not signed in yet — fine.
     }
@@ -80,6 +86,35 @@ class GoogleDriveSyncService extends ChangeNotifier {
       status = DriveSyncStatus.signedOut;
     }
     notifyListeners();
+  }
+
+  Future<void> _acceptOrRejectUser(GoogleSignInAccount user) async {
+    if (!GoogleAuthConfig.isEmailAllowed(user.email)) {
+      lastError =
+          'This Google account is not allowed (${user.email}). '
+          'Ask the owner to add it to GOOGLE_ALLOWED_EMAILS.';
+      status = DriveSyncStatus.error;
+      account = null;
+      notifyListeners();
+      try {
+        await _signIn.signOut();
+      } catch (_) {}
+      return;
+    }
+    account = user;
+    status = DriveSyncStatus.idle;
+    lastError = null;
+    await _rememberSignedIn(user.email);
+    await dismissPrompt();
+    notifyListeners();
+  }
+
+  Future<void> _rememberSignedIn(String email) async {
+    lastKnownEmail = email;
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.setString('drive_sync_last_email', email);
+    await prefs.setBool('drive_sync_prompt_dismissed', true);
+    promptDismissed = true;
   }
 
   Future<void> dismissPrompt() async {
@@ -92,12 +127,18 @@ class GoogleDriveSyncService extends ChangeNotifier {
   Future<void> signInInteractive() async {
     if (!GoogleAuthConfig.isConfigured) {
       throw StateError(
-        'GOOGLE_CLIENT_ID is not configured. See README → Google Drive sync.',
+        'GOOGLE_CLIENT_ID and GOOGLE_ALLOWED_EMAILS must be configured. '
+        'See README → Google Drive sync.',
       );
     }
     lastError = null;
     if (_signIn.supportsAuthenticate()) {
-      await _signIn.authenticate(scopeHint: GoogleAuthConfig.driveScopes);
+      final user =
+          await _signIn.authenticate(scopeHint: GoogleAuthConfig.driveScopes);
+      await _acceptOrRejectUser(user);
+      if (account == null) {
+        throw StateError(lastError ?? 'Google account not allowed');
+      }
     } else {
       throw StateError(
         'Use the Google Sign-In button (web requires the official button).',
@@ -115,16 +156,18 @@ class GoogleDriveSyncService extends ChangeNotifier {
     notifyListeners();
   }
 
-  /// Mark local data dirty and schedule an upload when signed in.
+  /// Mark local data dirty and schedule a silent upload when signed in.
   void schedulePush(Future<String> Function() buildBackupJson) {
-    markLocalChanged();
+    unawaited(markLocalChanged());
     if (!isSignedIn) return;
     _pushDebounce?.cancel();
     _pushDebounce = Timer(const Duration(seconds: 3), () async {
       try {
-        await pushBackup(await buildBackupJson());
+        await pushBackup(await buildBackupJson(), interactive: false);
       } catch (e) {
-        lastError = e.toString();
+        // Silent background failure — user can tap Sync now (re-auth if needed).
+        lastError =
+            'Auto-sync paused. Tap Sync now to reconnect Google Drive.';
         status = DriveSyncStatus.error;
         notifyListeners();
       }
@@ -153,9 +196,11 @@ class GoogleDriveSyncService extends ChangeNotifier {
   /// Pull/push so the newer of local vs Drive wins (last-write-wins).
   ///
   /// Returns remote JSON when a restore should be applied; otherwise null.
+  /// [interactive] only when the user tapped Sync now / just signed in.
   Future<String?> reconcile({
     required Future<String> Function() buildBackupJson,
     required int localTransactionCount,
+    bool interactive = false,
   }) async {
     if (!isSignedIn) return null;
     status = DriveSyncStatus.syncing;
@@ -163,14 +208,15 @@ class GoogleDriveSyncService extends ChangeNotifier {
     notifyListeners();
 
     try {
-      await _ensureDriveAuthorized(interactive: false);
-      final remote = await _downloadSyncFile();
+      await _ensureDriveAuthorized(interactive: interactive);
+      final remote = await _downloadSyncFile(interactive: interactive);
       final localJson = await buildBackupJson();
-      final localUpdated = localUpdatedAt ?? DateTime.fromMillisecondsSinceEpoch(0);
+      final localUpdated =
+          localUpdatedAt ?? DateTime.fromMillisecondsSinceEpoch(0);
 
       if (remote == null) {
         if (localTransactionCount > 0 || localJson.trim().isNotEmpty) {
-          await pushBackup(localJson);
+          await pushBackup(localJson, interactive: interactive);
         }
         status = DriveSyncStatus.idle;
         notifyListeners();
@@ -188,7 +234,7 @@ class GoogleDriveSyncService extends ChangeNotifier {
 
       if (localUpdated.isAfter(remoteUpdated.add(const Duration(seconds: 1))) ||
           localTransactionCount > 0 && remote.json.trim().isEmpty) {
-        await pushBackup(localJson);
+        await pushBackup(localJson, interactive: interactive);
       } else {
         await _markSynced();
       }
@@ -197,25 +243,30 @@ class GoogleDriveSyncService extends ChangeNotifier {
       notifyListeners();
       return null;
     } catch (e) {
-      lastError = e.toString();
+      lastError = interactive
+          ? e.toString()
+          : 'Auto-sync paused. Tap Sync now to reconnect Google Drive.';
       status = DriveSyncStatus.error;
       notifyListeners();
-      rethrow;
+      if (interactive) rethrow;
+      return null;
     }
   }
 
-  Future<void> pushBackup(String backupJson) async {
+  Future<void> pushBackup(
+    String backupJson, {
+    bool interactive = false,
+  }) async {
     if (!isSignedIn) return;
     status = DriveSyncStatus.syncing;
     lastError = null;
     notifyListeners();
 
     try {
-      await _ensureDriveAuthorized(interactive: true);
       final updated = localUpdatedAt ?? DateTime.now().toUtc();
       final envelope = _wrapBackup(backupJson, updated);
       final bytes = utf8.encode(envelope);
-      final api = await _driveApi();
+      final api = await _driveApi(interactive: interactive);
       final existingId = await _findSyncFileId(api);
       final media = drive.Media(Stream.value(bytes), bytes.length);
 
@@ -237,10 +288,12 @@ class GoogleDriveSyncService extends ChangeNotifier {
       status = DriveSyncStatus.idle;
       notifyListeners();
     } catch (e) {
-      lastError = e.toString();
+      lastError = interactive
+          ? e.toString()
+          : 'Auto-sync paused. Tap Sync now to reconnect Google Drive.';
       status = DriveSyncStatus.error;
       notifyListeners();
-      rethrow;
+      if (interactive) rethrow;
     }
   }
 
@@ -252,6 +305,7 @@ class GoogleDriveSyncService extends ChangeNotifier {
     final remoteJson = await reconcile(
       buildBackupJson: buildBackupJson,
       localTransactionCount: localTransactionCount,
+      interactive: true,
     );
     if (remoteJson != null) {
       await restoreBackup(remoteJson);
@@ -268,8 +322,8 @@ class GoogleDriveSyncService extends ChangeNotifier {
     return const JsonEncoder.withIndent('  ').convert(decoded);
   }
 
-  Future<_RemoteSync?> _downloadSyncFile() async {
-    final api = await _driveApi();
+  Future<_RemoteSync?> _downloadSyncFile({required bool interactive}) async {
+    final api = await _driveApi(interactive: interactive);
     final id = await _findSyncFileId(api);
     if (id == null) return null;
 
@@ -304,8 +358,8 @@ class GoogleDriveSyncService extends ChangeNotifier {
     return files.first.id;
   }
 
-  Future<drive.DriveApi> _driveApi() async {
-    final auth = await _ensureDriveAuthorized(interactive: true);
+  Future<drive.DriveApi> _driveApi({required bool interactive}) async {
+    final auth = await _ensureDriveAuthorized(interactive: interactive);
     final client = auth.authClient(scopes: GoogleAuthConfig.driveScopes);
     return drive.DriveApi(client);
   }
@@ -324,7 +378,11 @@ class GoogleDriveSyncService extends ChangeNotifier {
       auth = await user.authorizationClient.authorizeScopes(scopes);
     }
     if (auth == null) {
-      throw StateError('Google Drive permission was not granted');
+      throw StateError(
+        interactive
+            ? 'Google Drive permission was not granted'
+            : 'Drive authorization expired',
+      );
     }
     return auth;
   }
