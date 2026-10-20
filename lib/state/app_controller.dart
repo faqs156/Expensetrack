@@ -46,12 +46,6 @@ class AppController extends ChangeNotifier with WidgetsBindingObserver {
 
   final VaultSafetyService _vaultSafety;
 
-  /// Show home banner: edits not on Drive yet, or Google needs reconnect.
-  bool get needsDriveUploadAttention =>
-      driveSync.hasPendingPush ||
-      driveSync.needsGoogleReconnect ||
-      driveSync.driveUploadBlocked;
-
   GoogleSignInAccount? _prevDriveAccount;
 
   /// Allowlisted user: live Google session **or** resumed local session after refresh.
@@ -421,7 +415,7 @@ class AppController extends ChangeNotifier with WidgetsBindingObserver {
       localTransactionCount: count,
       safetyJson: safety,
     );
-    // Confirm this device's txs are on Drive (phone → Mac path).
+    // Confirm the shared account vault includes local transactions.
     final localJson = await _backup.createBackupJson();
     await driveSync.verifyRemoteContains(localJson, interactive: true);
     await refreshDashboard();

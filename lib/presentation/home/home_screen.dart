@@ -56,7 +56,7 @@ class HomeScreen extends StatelessWidget {
                     color: theme.colorScheme.onSurface.withValues(alpha: 0.55),
                   ),
                 ),
-                if (app.needsDriveUploadAttention || app.needsCloudPull) ...[
+                if (app.needsCloudPull) ...[
                   const SizedBox(height: 12),
                   Material(
                     color: theme.colorScheme.secondaryContainer,
@@ -66,19 +66,13 @@ class HomeScreen extends StatelessWidget {
                       child: Row(
                         children: [
                           Icon(
-                            app.needsDriveUploadAttention
-                                ? Icons.cloud_upload_outlined
-                                : Icons.cloud_download_outlined,
+                            Icons.cloud_sync_outlined,
                             color: theme.colorScheme.onSecondaryContainer,
                           ),
                           const SizedBox(width: 10),
                           Expanded(
                             child: Text(
-                              app.needsDriveUploadAttention
-                                  ? (app.driveSync.needsGoogleReconnect
-                                      ? 'Google disconnected — edits are only on this device until you Sync.'
-                                      : 'Edits saved here but not confirmed on Drive yet. Sync so Mac can see them.')
-                                  : 'No data on this device yet. Sync to load it.',
+                              'Loading your expenses from your account…',
                               style: theme.textTheme.bodyMedium?.copyWith(
                                 color: theme.colorScheme.onSecondaryContainer,
                               ),
@@ -93,7 +87,7 @@ class HomeScreen extends StatelessWidget {
                                 if (context.mounted) {
                                   ScaffoldMessenger.of(context).showSnackBar(
                                     const SnackBar(
-                                      content: Text('Sync finished'),
+                                      content: Text('Synced'),
                                     ),
                                   );
                                 }

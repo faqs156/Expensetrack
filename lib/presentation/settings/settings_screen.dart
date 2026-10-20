@@ -14,19 +14,17 @@ class SettingsScreen extends StatelessWidget {
   const SettingsScreen({super.key});
 
   String _driveSyncSubtitle(AppController app) {
-    if (app.driveSync.status == DriveSyncStatus.syncing) {
-      return 'Syncing…';
+    if (app.driveSync.status == DriveSyncStatus.syncing ||
+        app.driveSync.hasPendingPush) {
+      return 'Syncing your account…';
     }
     if (app.driveSync.needsGoogleReconnect) {
-      return 'Tap Sync now — Google disconnected (phone-only edits)';
-    }
-    if (app.driveSync.hasPendingPush) {
-      return 'Waiting to upload — tap Sync now';
+      return 'Tap Sync now to reconnect';
     }
     final last = app.driveSync.lastSyncedAt;
-    if (last == null) return 'Signed in';
+    if (last == null) return 'Signed in — shared across your devices';
     final local = last.toLocal();
-    return 'Last synced ${local.year}-'
+    return 'Account synced ${local.year}-'
         '${local.month.toString().padLeft(2, '0')}-'
         '${local.day.toString().padLeft(2, '0')} '
         '${local.hour.toString().padLeft(2, '0')}:'
@@ -336,11 +334,10 @@ class SettingsScreen extends StatelessWidget {
                 ),
           title: const Text('Sync now'),
           subtitle: Text(
-            app.driveSync.status == DriveSyncStatus.syncing
-                ? 'Syncing…'
-                : app.driveSync.hasPendingPush
-                    ? 'Uploading changes…'
-                    : 'Download & upload with Google Drive',
+            app.driveSync.status == DriveSyncStatus.syncing ||
+                    app.driveSync.hasPendingPush
+                ? 'Syncing your account…'
+                : 'Refresh the shared vault on all your devices',
           ),
           onTap: app.driveSync.status == DriveSyncStatus.syncing
               ? null
@@ -350,25 +347,21 @@ class SettingsScreen extends StatelessWidget {
           contentPadding: EdgeInsets.zero,
           leading: const Icon(Icons.schedule_outlined),
           title: const Text('When data is saved'),
-          subtitle: Text(
-            kIsWeb
-                ? 'Local: instantly + safety snapshot on this device. '
-                    'Drive: ~2s after edits, every 5 min, and before sign-out. Sync merges devices and keeps a previous Drive copy.'
-                : 'Phone: instantly in the app DB + safety snapshot. '
-                    'Drive: ~2s after edits, every 5 min, and before sign-out. Sync merges devices and keeps a previous Drive copy.',
+          subtitle: const Text(
+            'Your account vault updates automatically after each edit (~1s), '
+            'about every 2 minutes while open, when you reopen the app, and before sign-out. '
+            'All signed-in browsers share the same data.',
           ),
         ),
         ListTile(
           contentPadding: EdgeInsets.zero,
           leading: const Icon(Icons.logout),
           title: const Text('Sign out'),
-          subtitle: const Text(
-            'Uploads your data first; keeps it on this device',
-          ),
+          subtitle: const Text('Syncs your account first, then signs out'),
           onTap: () async {
             final messenger = ScaffoldMessenger.of(context);
             messenger.showSnackBar(
-              const SnackBar(content: Text('Saving to Drive, then signing out…')),
+              const SnackBar(content: Text('Syncing your account, then signing out…')),
             );
             await context.read<AppController>().signOutGoogle();
           },
@@ -444,7 +437,7 @@ class SettingsScreen extends StatelessWidget {
           leading: const Icon(Icons.phonelink_lock_outlined),
           title: const Text('Where data lives'),
           subtitle: Text(
-            'Stored on this device and synced with your Google account.',
+            'Synced with your Google account across devices.',
           ),
         ),
         const Divider(height: 32),
@@ -466,8 +459,9 @@ class SettingsScreen extends StatelessWidget {
               builder: (ctx) => AlertDialog(
                 title: const Text('Privacy'),
                 content: const Text(
-                  'ExpenseTrack stores data on this device and can sync it with '
-                  'your Google account. There are no ads or analytics.',
+                  'ExpenseTrack keeps a local cache for speed and syncs your '
+                  'expenses with your Google account so every signed-in browser '
+                  'sees the same data. There are no ads or analytics.',
                 ),
                 actions: [
                   TextButton(
