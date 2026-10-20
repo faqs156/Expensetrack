@@ -79,9 +79,8 @@ class GoogleDriveSyncService extends ChangeNotifier {
       notifyListeners();
     });
 
-    // Always try to restore Google so Drive can sync on every open / login
-    // (Chrome, Safari, Firefox — One Tap / FedCM timing differs by browser).
-    await restoreGoogleSession(timeout: const Duration(seconds: 20));
+    // Kick One Tap in the background — do not block app startup.
+    unawaited(restoreGoogleSession(timeout: const Duration(seconds: 8)));
 
     _initialized = true;
     if (account == null) {
@@ -92,7 +91,7 @@ class GoogleDriveSyncService extends ChangeNotifier {
 
   /// One Tap / silent restore. Returns true when a live Google session exists.
   Future<bool> restoreGoogleSession({
-    Duration timeout = const Duration(seconds: 12),
+    Duration timeout = const Duration(seconds: 8),
   }) async {
     if (account != null) return true;
     try {

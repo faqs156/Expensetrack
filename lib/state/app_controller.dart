@@ -65,10 +65,14 @@ class AppController extends ChangeNotifier {
     final becameSignedIn = _prevDriveAccount == null && current != null;
     _prevDriveAccount = current;
     notifyListeners();
-    // Any browser (Chrome / Safari / Firefox): as soon as Google is live, sync.
-    // Do not skip when loading — One Tap often finishes after init started.
-    if (becameSignedIn && GoogleAuthConfig.isEmailAllowed(current.email)) {
+    if (!becameSignedIn || !GoogleAuthConfig.isEmailAllowed(current.email)) {
+      return;
+    }
+    // Fresh login screen → full sync. Already in app → quiet background sync.
+    if (!vaultLoaded) {
       unawaited(_afterGoogleSignIn());
+    } else {
+      unawaited(_quietBackgroundSync());
     }
   }
 
@@ -78,7 +82,7 @@ class AppController extends ChangeNotifier {
     try {
       loginSuccessMessage = 'Signed in as ${driveSync.email}';
       notifyListeners();
-      // Every login from any browser: pull/push Drive immediately.
+      // User just tapped Google — interactive Drive grant is OK here.
       await _loadVaultAndSync(interactive: true);
       if (driveSync.lastError != null) {
         driveSync.clearLastError();
@@ -100,6 +104,17 @@ class AppController extends ChangeNotifier {
       loading = false;
       notifyListeners();
     }
+  }
+
+  Future<void> _quietBackgroundSync() async {
+    if (driveSync.status == DriveSyncStatus.syncing) return;
+    try {
+      await _loadVaultAndSync(interactive: false);
+      needsCloudPull = false;
+    } catch (_) {
+      needsCloudPull = true;
+    }
+    notifyListeners();
   }
 
   final CategoryRepository _categories;
@@ -156,34 +171,39 @@ class AppController extends ChangeNotifier {
         return;
       }
 
-      // Wherever you open the app: connect Google + sync Drive before settling.
-      if (!driveSync.isSignedIn) {
-        await driveSync.restoreGoogleSession(
-          timeout: const Duration(seconds: 20),
-        );
-      }
-
-      if (driveSync.isSignedIn) {
-        // Prefer interactive once so Safari/Firefox can grant Drive in this gesture window.
-        try {
-          await _loadVaultAndSync(interactive: true);
-        } catch (_) {
-          await _loadVaultAndSync(interactive: false);
-        }
-        final count = await _transactions.countAll();
-        needsCloudPull = count == 0;
-      } else {
-        await _loadVaultFromDb();
-        needsCloudPull = true;
-      }
-
+      // Fast path: show local data immediately (no Google wait / no banner flash).
+      await _loadVaultFromDb();
+      needsCloudPull = false;
       _startPeriodicSync();
+
+      // Drive sync in background — does not block first paint.
+      unawaited(_syncAfterOpenInBackground());
     } catch (e) {
       error = e.toString();
     } finally {
       loading = false;
       notifyListeners();
     }
+  }
+
+  Future<void> _syncAfterOpenInBackground() async {
+    try {
+      if (!driveSync.isSignedIn) {
+        await driveSync.restoreGoogleSession(
+          timeout: const Duration(seconds: 8),
+        );
+      }
+      if (driveSync.isSignedIn) {
+        await _loadVaultAndSync(interactive: false);
+      }
+      // Banner only if this browser is still empty after trying to sync.
+      final count = await _transactions.countAll();
+      needsCloudPull = count == 0 && !driveSync.isSignedIn;
+    } catch (_) {
+      final count = await _transactions.countAll();
+      needsCloudPull = count == 0;
+    }
+    notifyListeners();
   }
 
   Timer? _periodicSyncTimer;

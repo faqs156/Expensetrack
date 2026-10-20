@@ -56,7 +56,7 @@ class HomeScreen extends StatelessWidget {
                     color: theme.colorScheme.onSurface.withValues(alpha: 0.55),
                   ),
                 ),
-                if (app.needsCloudPull || app.driveSync.needsGoogleReconnect) ...[
+                if (app.needsCloudPull) ...[
                   const SizedBox(height: 12),
                   Material(
                     color: theme.colorScheme.secondaryContainer,
@@ -72,7 +72,7 @@ class HomeScreen extends StatelessWidget {
                           const SizedBox(width: 10),
                           Expanded(
                             child: Text(
-                              'Syncing your data… tap Sync if nothing appears.',
+                              'No data on this device yet. Sync to load it.',
                               style: theme.textTheme.bodyMedium?.copyWith(
                                 color: theme.colorScheme.onSecondaryContainer,
                               ),
