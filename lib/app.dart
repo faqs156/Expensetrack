@@ -3,6 +3,7 @@ import 'package:provider/provider.dart';
 
 import 'core/theme/app_theme.dart';
 import 'data/models/app_settings.dart';
+import 'presentation/shell/google_sign_in_prompt.dart';
 import 'presentation/shell/main_shell.dart';
 import 'presentation/shell/restore_offer_host.dart';
 import 'state/app_controller.dart';
@@ -66,7 +67,9 @@ class _AppView extends StatelessWidget {
                 ),
               ),
             )
-          : const RestoreOfferHost(child: MainShell()),
+          : const GoogleSignInPromptHost(
+              child: RestoreOfferHost(child: MainShell()),
+            ),
     );
   }
 }

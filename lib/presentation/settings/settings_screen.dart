@@ -3,14 +3,58 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:provider/provider.dart';
 
+import '../../core/google_auth_config.dart';
 import '../../data/models/app_settings.dart';
+import '../../data/services/google_drive_sync_service.dart';
 import '../../platform/file_actions.dart';
 import '../../state/app_controller.dart';
 import 'budget_screen.dart';
 import 'categories_screen.dart';
+import 'google_sign_in_button.dart';
 
 class SettingsScreen extends StatelessWidget {
   const SettingsScreen({super.key});
+
+  String _driveSyncSubtitle(AppController app) {
+    if (!app.driveSync.isSignedIn) {
+      return 'Same Google account → same vault on every device & browser';
+    }
+    final last = app.driveSync.lastSyncedAt;
+    if (app.driveSync.status == DriveSyncStatus.syncing) {
+      return 'Syncing with Google Drive…';
+    }
+    if (last == null) return 'Signed in — tap Sync now';
+    final local = last.toLocal();
+    return 'Last synced ${local.year}-'
+        '${local.month.toString().padLeft(2, '0')}-'
+        '${local.day.toString().padLeft(2, '0')} '
+        '${local.hour.toString().padLeft(2, '0')}:'
+        '${local.minute.toString().padLeft(2, '0')}';
+  }
+
+  Future<void> _signInGoogle(BuildContext context) async {
+    final messenger = ScaffoldMessenger.of(context);
+    try {
+      await context.read<AppController>().signInWithGoogle();
+      messenger.showSnackBar(
+        const SnackBar(content: Text('Signed in — Drive sync ready')),
+      );
+    } catch (e) {
+      messenger.showSnackBar(SnackBar(content: Text('Sign-in failed: $e')));
+    }
+  }
+
+  Future<void> _syncNow(BuildContext context) async {
+    final messenger = ScaffoldMessenger.of(context);
+    try {
+      await context.read<AppController>().syncGoogleDriveNow();
+      messenger.showSnackBar(
+        const SnackBar(content: Text('Google Drive sync finished')),
+      );
+    } catch (e) {
+      messenger.showSnackBar(SnackBar(content: Text('Sync failed: $e')));
+    }
+  }
 
   Future<void> _exportCsv(BuildContext context) async {
     final app = context.read<AppController>();
@@ -277,6 +321,78 @@ class SettingsScreen extends StatelessWidget {
           ),
         ),
         const Divider(height: 32),
+        Text('Google Drive sync', style: theme.textTheme.titleSmall),
+        const SizedBox(height: 4),
+        if (!GoogleAuthConfig.isConfigured)
+          ListTile(
+            contentPadding: EdgeInsets.zero,
+            leading: const Icon(Icons.cloud_off_outlined),
+            title: const Text('Google sync not configured'),
+            subtitle: const Text(
+              'Build with --dart-define=GOOGLE_CLIENT_ID=… and enable '
+              'Drive API (see README).',
+            ),
+          )
+        else ...[
+          ListTile(
+            contentPadding: EdgeInsets.zero,
+            leading: Icon(
+              app.driveSync.isSignedIn
+                  ? Icons.cloud_done_outlined
+                  : Icons.cloud_outlined,
+            ),
+            title: Text(
+              app.driveSync.isSignedIn
+                  ? (app.driveSync.email ?? 'Signed in')
+                  : 'Not signed in',
+            ),
+            subtitle: Text(_driveSyncSubtitle(app)),
+          ),
+          if (!app.driveSync.isSignedIn)
+            Align(
+              alignment: Alignment.centerLeft,
+              child: GoogleSignInButton(
+                onPressed: () => _signInGoogle(context),
+              ),
+            )
+          else ...[
+            ListTile(
+              contentPadding: EdgeInsets.zero,
+              leading: app.driveSync.status == DriveSyncStatus.syncing
+                  ? const SizedBox(
+                      width: 24,
+                      height: 24,
+                      child: CircularProgressIndicator(strokeWidth: 2),
+                    )
+                  : const Icon(Icons.sync),
+              title: const Text('Sync now'),
+              subtitle: const Text('Pull newer Drive data or upload this device'),
+              onTap: app.driveSync.status == DriveSyncStatus.syncing
+                  ? null
+                  : () => _syncNow(context),
+            ),
+            ListTile(
+              contentPadding: EdgeInsets.zero,
+              leading: const Icon(Icons.logout),
+              title: const Text('Sign out of Google'),
+              subtitle: const Text('Keeps Drive backup; stops auto-sync here'),
+              onTap: () async {
+                await context.read<AppController>().signOutGoogle();
+              },
+            ),
+          ],
+          if (app.driveSync.lastError != null)
+            Padding(
+              padding: const EdgeInsets.only(top: 4, bottom: 8),
+              child: Text(
+                app.driveSync.lastError!,
+                style: theme.textTheme.bodySmall?.copyWith(
+                  color: theme.colorScheme.error,
+                ),
+              ),
+            ),
+        ],
+        const Divider(height: 32),
         Text('Data', style: theme.textTheme.titleSmall),
         ListTile(
           contentPadding: EdgeInsets.zero,
@@ -327,13 +443,41 @@ class SettingsScreen extends StatelessWidget {
         ),
         ListTile(
           contentPadding: EdgeInsets.zero,
-          leading: const Icon(Icons.info_outline),
+          leading: const Icon(Icons.phonelink_lock_outlined),
           title: const Text('Where data lives'),
           subtitle: Text(
             kIsWeb
-                ? 'SQLite in this browser (IndexedDB). Clearing Safari data deletes it. No sync across devices.'
+                ? (app.driveSync.isSignedIn
+                    ? 'Signed in: vault syncs via Google Drive app data for this account. '
+                        'Local copy still works offline.'
+                    : 'Without Google: one vault per browser on this phone. '
+                        'Sign in above to share across devices & Chrome/Safari.')
                 : 'SQLite on this device only. Uninstall may wipe data unless you keep app data or restore a backup.',
           ),
+          onTap: () {
+            showDialog<void>(
+              context: context,
+              builder: (ctx) => AlertDialog(
+                title: const Text('Your vault'),
+                content: Text(
+                  app.driveSync.isSignedIn
+                      ? 'Signed in with Google. ExpenseTrack uploads a private sync file to '
+                          'Google Drive app data (hidden from My Drive). The same account on '
+                          'another phone or browser downloads that file — last write wins.\n\n'
+                          'Offline edits stay local until the next sync.'
+                      : 'Local saves stay in this browser only.\n\n'
+                          'Sign in with Google (Settings → Google Drive sync) to use the same '
+                          'vault on every device with that account. Or use Backup / Restore JSON.',
+                ),
+                actions: [
+                  TextButton(
+                    onPressed: () => Navigator.pop(ctx),
+                    child: const Text('Close'),
+                  ),
+                ],
+              ),
+            );
+          },
         ),
         const Divider(height: 32),
         Text('About', style: theme.textTheme.titleSmall),
@@ -347,8 +491,10 @@ class SettingsScreen extends StatelessWidget {
           contentPadding: EdgeInsets.zero,
           leading: const Icon(Icons.lock_outline),
           title: const Text('Privacy'),
-          subtitle: const Text(
-            'No accounts, analytics, or cloud sync. Data stays on this device/browser.',
+          subtitle: Text(
+            app.driveSync.isSignedIn
+                ? 'Optional Google Drive sync. No ads. Local SQLite + private Drive app file.'
+                : 'Optional Google sign-in for Drive sync. Otherwise data stays on this device.',
           ),
           onTap: () {
             showDialog<void>(
@@ -357,12 +503,12 @@ class SettingsScreen extends StatelessWidget {
                 title: const Text('Privacy'),
                 content: Text(
                   kIsWeb
-                      ? 'ExpenseTrack stores your finances in a local SQLite database inside this browser (IndexedDB). '
-                          'There is no login or server sync. Export/Backup only creates a file when you tap those actions. '
-                          'Safari may clear site data under storage pressure — keep JSON backups for anything important.'
-                      : 'ExpenseTrack stores your financial data in a local SQLite database on this device. '
-                          'There is no login, advertising, or app cloud sync. '
-                          'Exports and backups are created only when you choose them.',
+                      ? 'Local data: SQLite in this browser (IndexedDB). '
+                          'Optional: sign in with Google to sync a private file in Drive app data '
+                          '(same Google account → same vault). We do not run our own server. '
+                          'Safari may clear site data — Drive sync or JSON backups protect you.'
+                      : 'Local SQLite on device. Optional Google Drive app-data sync when signed in. '
+                          'No advertising SDKs.',
                 ),
                 actions: [
                   TextButton(

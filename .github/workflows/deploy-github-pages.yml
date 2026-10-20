@@ -45,11 +45,30 @@ jobs:
       - name: Test
         run: flutter test
 
+      - name: Inject Google OAuth client ID
+        env:
+          GOOGLE_CLIENT_ID: ${{ secrets.GOOGLE_CLIENT_ID }}
+        run: |
+          if [ -n "${GOOGLE_CLIENT_ID}" ]; then
+            sed -i "s/YOUR_GOOGLE_CLIENT_ID\\.apps\\.googleusercontent\\.com/${GOOGLE_CLIENT_ID}/g" web/index.html
+            echo "Injected GOOGLE_CLIENT_ID into web/index.html"
+          else
+            echo "Secret GOOGLE_CLIENT_ID not set — Drive sync disabled in this build"
+          fi
+
       - name: Build web (GitHub Pages subpath)
         # Note: --pwa-strategy is deprecated; offline caching uses web/offline_sw.js
+        env:
+          GOOGLE_CLIENT_ID: ${{ secrets.GOOGLE_CLIENT_ID }}
         run: |
+          DEFINE=""
+          if [ -n "${GOOGLE_CLIENT_ID}" ]; then
+            DEFINE="--dart-define=GOOGLE_CLIENT_ID=${GOOGLE_CLIENT_ID}"
+          fi
+          # shellcheck disable=SC2086
           flutter build web --release \
-            --base-href /Expensetrack/
+            --base-href /Expensetrack/ \
+            $DEFINE
 
 
       - name: Upload Pages artifact

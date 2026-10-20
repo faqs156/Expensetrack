@@ -6,11 +6,22 @@ ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$ROOT"
 
 BASE_HREF="${BASE_HREF:-/Expensetrack/}"
+GOOGLE_CLIENT_ID="${GOOGLE_CLIENT_ID:-}"
 
 # Flutter hooks_runner drops DEVELOPER_DIR; put our xcrun shim first on PATH so
 # objective_c native-asset builds use Command Line Tools (no Xcode license).
 export PATH="$ROOT/tool/bin:$PATH"
 echo "==> PATH shim: $ROOT/tool/bin/xcrun"
+
+if [[ -n "$GOOGLE_CLIENT_ID" ]]; then
+  echo "==> Injecting GOOGLE_CLIENT_ID into web/index.html"
+  # macOS/BSD sed needs -i ''; GNU sed accepts -i.bak then remove.
+  sed -i.bak "s/YOUR_GOOGLE_CLIENT_ID\\.apps\\.googleusercontent\\.com/${GOOGLE_CLIENT_ID}/g" \
+    "$ROOT/web/index.html"
+  rm -f "$ROOT/web/index.html.bak"
+else
+  echo "==> GOOGLE_CLIENT_ID unset — Drive sync UI will show “not configured”"
+fi
 
 echo "==> pub get"
 flutter pub get
@@ -27,8 +38,13 @@ echo "==> test"
 flutter test
 
 echo "==> build web (base-href=$BASE_HREF; offline via web/offline_sw.js)"
+DEFINE_ARGS=()
+if [[ -n "$GOOGLE_CLIENT_ID" ]]; then
+  DEFINE_ARGS+=(--dart-define="GOOGLE_CLIENT_ID=$GOOGLE_CLIENT_ID")
+fi
 flutter build web --release \
-  --base-href "$BASE_HREF"
+  --base-href "$BASE_HREF" \
+  "${DEFINE_ARGS[@]}"
 
 echo ""
 echo "Build ready: $ROOT/build/web"

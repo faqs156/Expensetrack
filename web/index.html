@@ -6,7 +6,13 @@
   <meta charset="UTF-8">
   <meta content="IE=Edge" http-equiv="X-UA-Compatible">
   <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
-  <meta name="description" content="ExpenseTrack — offline personal expense tracker. Data stays on your device.">
+  <meta name="description" content="ExpenseTrack — offline personal expense tracker. Optional Google Drive sync.">
+
+  <!--
+    Google Sign-In (web). Replace YOUR_CLIENT_ID or inject at build time.
+    Must match --dart-define=GOOGLE_CLIENT_ID=… and OAuth "Authorized JavaScript origins".
+  -->
+  <meta name="google-signin-client_id" content="YOUR_GOOGLE_CLIENT_ID.apps.googleusercontent.com">
 
   <!-- PWA / Android -->
   <meta name="theme-color" content="#0F766E">

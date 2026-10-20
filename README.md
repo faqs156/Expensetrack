@@ -3,13 +3,14 @@
 Offline-first personal expense tracker (Flutter + SQLite).  
 Android app + installable **Progressive Web App** (Safari Add to Home Screen / Chrome install).
 
-**No backend, no login, no cloud sync.** Data stays in on-device SQLite (native) or browser IndexedDB (web/PWA).
+**Local SQLite always.** Optional **Google Sign-In → private Google Drive app-data file** so the same Google account shares one vault across phones and browsers.
 
 ## Features
 
 - Home dashboard, transactions, insights, budgets, categories  
 - Light / dark / system themes, INR default  
-- CSV import/export and JSON backup/restore (creates a real downloadable file)  
+- CSV import/export and JSON backup/restore  
+- Optional Google Drive sync (last-write-wins)  
 - Web PWA with offline app-shell caching after first visit  
 
 ## Run (local)
@@ -17,12 +18,44 @@ Android app + installable **Progressive Web App** (Safari Add to Home Screen / C
 ```bash
 flutter pub get
 flutter run                 # Android / device
-flutter run -d chrome       # Web (keep a stable port — IndexedDB is per port)
+flutter run -d chrome --web-hostname localhost --web-port 7357 \
+  --dart-define=GOOGLE_CLIENT_ID=YOUR_ID.apps.googleusercontent.com
 ```
 
-## Web SQLite assets
+## Google Drive sync (one-time Google Cloud setup)
 
-Requires `web/sqlite3.wasm` and `web/sqflite_sw.js` ([sqflite_common_ffi_web](https://pub.dev/packages/sqflite_common_ffi_web)):
+1. [Google Cloud Console](https://console.cloud.google.com/) → create/select a project  
+2. **APIs & Services → Library** → enable **Google Drive API**  
+3. **OAuth consent screen** → External (or Internal) → add scopes:
+   - `.../auth/drive.appdata`
+   - `email`, `openid`  
+   Add yourself as a **Test user** while the app is in Testing  
+4. **Credentials → Create credentials → OAuth client ID → Web application**  
+   - Authorized JavaScript origins:
+     - `http://localhost:7357`
+     - `https://faqs156.github.io`  
+   - Authorized redirect URIs (if asked): `https://faqs156.github.io/Expensetrack/`  
+5. Copy the client ID (`….apps.googleusercontent.com`)
+
+### Wire the client ID into the app
+
+1. Put it in `web/index.html` meta `google-signin-client_id`  
+2. Pass the same value at build time:
+
+```bash
+export GOOGLE_CLIENT_ID='xxxx.apps.googleusercontent.com'
+# also patches web/index.html meta for local deploy script
+./tool/deploy_web.sh
+```
+
+### GitHub Actions secret
+
+Repo → **Settings → Secrets → Actions** → `GOOGLE_CLIENT_ID` = your web client ID.  
+The Pages workflow injects it into the build.
+
+After sign-in, ExpenseTrack stores `expense_track_sync.json` in Drive **appDataFolder** (hidden from My Drive). Same account on another device pulls that file.
+
+## Web SQLite assets
 
 ```bash
 ./tool/setup_web_sqlite.sh
@@ -31,47 +64,31 @@ Requires `web/sqlite3.wasm` and `web/sqflite_sw.js` ([sqflite_common_ffi_web](ht
 
 ## GitHub Pages (production PWA)
 
-Repo: `https://github.com/faqs156/Expensetrack`  
-Live URL (after Pages is enabled): **https://faqs156.github.io/Expensetrack/**
+Live URL: **https://faqs156.github.io/Expensetrack/**
 
-### One-time GitHub setup
-
-1. Repo **Settings → Pages**  
-2. Source: **GitHub Actions**  
-3. Push to `main` (workflow `.github/workflows/deploy-github-pages.yml` builds with `--base-href /Expensetrack/`)
-
-### Local release build
-
-```bash
-./tool/deploy_web.sh
-# artifact in build/web
-```
+1. Repo **Settings → Pages** → Source: **GitHub Actions**  
+2. Add secret `GOOGLE_CLIENT_ID` (optional but required for Drive sync)  
+3. Push to `main`
 
 ### Install on iPhone (Safari)
 
-1. Open **https://faqs156.github.io/Expensetrack/** in **Safari** (HTTPS).  
-2. Wait for the first load (caches the app shell + WASM).  
-3. Share → **Add to Home Screen**.  
-4. Open from the Home Screen icon (standalone).  
-5. Add a transaction, force-quit, reopen — data should persist.  
-
-**Backup tip:** Settings → Backup data downloads a JSON file. Browser storage can be cleared by Safari; backups are not automatic.
+1. Open the live URL in **Safari**  
+2. Share → **Add to Home Screen**  
+3. Sign in with Google (prompt or Settings) to sync across devices  
 
 ## Test / analyze
 
-If `flutter test` fails on `objective_c` / `xcrun` (“Bad state: No element”), Xcode’s license is blocking the real `xcrun`. Prefer accepting the license (`sudo xcodebuild -license`), or prepend this repo’s shim (also used by `./tool/deploy_web.sh`):
+If `flutter test` fails on `objective_c` / `xcrun`, prepend this repo’s shim:
 
 ```bash
 export PATH="$PWD/tool/bin:$PATH"
 flutter analyze
 flutter test
-flutter build web --release --base-href /Expensetrack/
 ```
-
-Offline caching uses the custom service worker `web/offline_sw.js` (Flutter’s built-in SW is deprecated and only cleans up old workers).
 
 ## Privacy
 
-- No accounts, analytics, or advertising SDKs in this version.  
-- Web data: SQLite via WASM persisted in **IndexedDB** for that site origin.  
-- Clearing site data / “Clear History and Website Data” deletes finances unless you restored from a JSON backup you saved earlier.  
+- No advertising or analytics SDKs  
+- Default: data only in local SQLite / IndexedDB  
+- Optional: sync file in your Google Drive app data (your account; we don’t run a server)  
+- JSON Backup/Restore still available as a manual escape hatch  

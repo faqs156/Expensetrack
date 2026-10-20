@@ -8,9 +8,11 @@ class BackupService {
 
   Future<String> createBackupJson() async {
     final db = await _db.database;
+    final now = DateTime.now().toUtc().toIso8601String();
     final payload = {
       'version': 1,
-      'created_at': DateTime.now().toIso8601String(),
+      'created_at': now,
+      'updated_at': now,
       'categories': await db.query('categories'),
       'transactions': await db.query('transactions'),
       'budgets': await db.query('budgets'),

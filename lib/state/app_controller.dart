@@ -1,4 +1,7 @@
+import 'dart:async';
+
 import 'package:flutter/foundation.dart';
+import 'package:google_sign_in/google_sign_in.dart';
 
 import '../core/date_keys.dart';
 import '../data/models/app_settings.dart';
@@ -12,6 +15,7 @@ import '../data/repositories/transaction_repository.dart';
 import '../data/services/backup_service.dart';
 import '../data/services/csv_service.dart';
 import '../data/services/data_survival_service.dart';
+import '../data/services/google_drive_sync_service.dart';
 
 class AppController extends ChangeNotifier {
   AppController({
@@ -22,14 +26,45 @@ class AppController extends ChangeNotifier {
     CsvService? csv,
     BackupService? backup,
     DataSurvivalService? survival,
+    GoogleDriveSyncService? driveSync,
   })  : _categories = categories ?? CategoryRepository(),
         _transactions = transactions ?? TransactionRepository(),
         _budgets = budgets ?? BudgetRepository(),
         _settingsRepo = settings ?? SettingsRepository(),
         _backup = backup ?? BackupService(),
-        _survival = survival ?? DataSurvivalService() {
+        _survival = survival ?? DataSurvivalService(),
+        driveSync = driveSync ?? GoogleDriveSyncService() {
     _csv = csv ??
         CsvService(transactions: _transactions, categories: _categories);
+    this.driveSync.addListener(_onDriveSyncChanged);
+  }
+
+  GoogleSignInAccount? _prevDriveAccount;
+
+  void _onDriveSyncChanged() {
+    final current = driveSync.account;
+    if (_prevDriveAccount == null && current != null && !loading) {
+      unawaited(_afterGoogleSignIn());
+    }
+    _prevDriveAccount = current;
+    notifyListeners();
+  }
+
+  Future<void> _afterGoogleSignIn() async {
+    try {
+      final count = await _transactions.countAll();
+      final remoteJson = await driveSync.reconcile(
+        buildBackupJson: _backup.createBackupJson,
+        localTransactionCount: count,
+      );
+      if (remoteJson != null) {
+        await restoreBackup(remoteJson);
+      } else if (count > 0) {
+        await driveSync.pushBackup(await _backup.createBackupJson());
+      }
+    } catch (_) {
+      // User can tap Sync now; local data remains usable.
+    }
   }
 
   final CategoryRepository _categories;
@@ -39,6 +74,7 @@ class AppController extends ChangeNotifier {
   late final CsvService _csv;
   final BackupService _backup;
   final DataSurvivalService _survival;
+  final GoogleDriveSyncService driveSync;
 
   bool loading = true;
   String? error;
@@ -72,16 +108,36 @@ class AppController extends ChangeNotifier {
     pendingRestoreJson = null;
     notifyListeners();
     try {
+      await driveSync.initialize();
       settings = await _settingsRepo.load();
       categories = await _categories.getAll();
       await refreshDashboard();
       await refreshTransactions();
 
-      final count = await _transactions.countAll();
+      var count = await _transactions.countAll();
       if (count == 0 && !restoreOfferDismissed) {
         final surviving = await _survival.readSurvivingBackup();
         if (surviving != null && surviving.trim().isNotEmpty) {
           pendingRestoreJson = surviving;
+        }
+      }
+
+      if (driveSync.isSignedIn) {
+        try {
+          final remoteJson = await driveSync.reconcile(
+            buildBackupJson: _backup.createBackupJson,
+            localTransactionCount: count,
+          );
+          if (remoteJson != null) {
+            await _backup.restoreBackupJson(remoteJson);
+            settings = await _settingsRepo.load();
+            categories = await _categories.getAll();
+            await refreshDashboard();
+            await refreshTransactions();
+            count = await _transactions.countAll();
+          }
+        } catch (_) {
+          // Offline or token expired — local data still works.
         }
       }
 
@@ -113,6 +169,23 @@ class AppController extends ChangeNotifier {
 
   void _persistSurvival() {
     _survival.scheduleAfterChange(() => _backup.createBackupJson());
+    driveSync.schedulePush(() => _backup.createBackupJson());
+  }
+
+  Future<void> signInWithGoogle() async {
+    await driveSync.signInInteractive();
+    // Drive reconcile runs via _onDriveSyncChanged → _afterGoogleSignIn.
+  }
+
+  Future<void> signOutGoogle() => driveSync.signOut();
+
+  Future<void> syncGoogleDriveNow() async {
+    final count = await _transactions.countAll();
+    await driveSync.syncNow(
+      buildBackupJson: _backup.createBackupJson,
+      restoreBackup: restoreBackup,
+      localTransactionCount: count,
+    );
   }
 
   Future<void> refreshDashboard() async {
@@ -281,8 +354,13 @@ class AppController extends ChangeNotifier {
 
   Future<void> restoreBackup(String json) async {
     await _backup.restoreBackupJson(json);
-    await init();
-    _persistSurvival();
+    settings = await _settingsRepo.load();
+    categories = await _categories.getAll();
+    await refreshDashboard();
+    await refreshTransactions();
+    notifyListeners();
+    // Survival only — Drive push is skipped right after a pull to avoid loops.
+    _survival.scheduleAfterChange(() => _backup.createBackupJson());
   }
 
   Future<void> clearAllData() async {
@@ -317,6 +395,8 @@ class AppController extends ChangeNotifier {
 
   @override
   void dispose() {
+    driveSync.removeListener(_onDriveSyncChanged);
+    driveSync.dispose();
     _survival.dispose();
     super.dispose();
   }
