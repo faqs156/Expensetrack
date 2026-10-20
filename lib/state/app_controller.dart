@@ -5,6 +5,7 @@ import 'package:google_sign_in/google_sign_in.dart';
 
 import '../core/date_keys.dart';
 import '../core/google_auth_config.dart';
+import '../core/sync_rules.dart';
 import '../data/models/app_settings.dart';
 import '../data/models/budget.dart';
 import '../data/models/category.dart';
@@ -42,6 +43,14 @@ class AppController extends ChangeNotifier with WidgetsBindingObserver {
         CsvService(transactions: _transactions, categories: _categories);
     this.driveSync.addListener(_onDriveSyncChanged);
     this.driveSync.bindBackupBuilder(() => _backup.createBackupJson());
+    this.driveSync.onVaultMerged = (json) async {
+      await _safeRestore(json);
+      this.settings = await _settingsRepo.load();
+      this.categories = await _categories.getAll();
+      await refreshDashboard();
+      await refreshTransactions();
+      notifyListeners();
+    };
   }
 
   final VaultSafetyService _vaultSafety;
@@ -379,26 +388,39 @@ class AppController extends ChangeNotifier with WidgetsBindingObserver {
     _periodicSyncTimer?.cancel();
     _periodicSyncTimer = null;
 
-    // Must reconnect + upload BEFORE clearing Google — local-only session
-    // was the main reason Mac never saw phone edits.
+    // Best-effort upload with a hard timeout — never block sign-out forever.
     try {
       final json = await _backup.createBackupJson();
       await _vaultSafety.save(VaultSafetyService.preSignOutId, json);
-      if (!driveSync.isSignedIn) {
-        await driveSync.ensureGoogleConnected(
-          timeout: const Duration(seconds: 45),
-        );
+      if (driveSync.hasPendingPush || driveSync.isSignedIn) {
+        await Future.any([
+          () async {
+            if (!driveSync.isSignedIn) {
+              await driveSync.ensureGoogleConnected(
+                timeout: SyncRules.signOutUploadTimeout,
+                allowPrompt: true,
+              );
+            }
+            // Merge cycle so we don't blind-push over other devices.
+            final count = await _transactions.countAll();
+            final safety = await _vaultSafety.readBest();
+            await driveSync.reconcile(
+              buildBackupJson: () async => json,
+              localTransactionCount: count,
+              safetyJson: safety,
+              interactive: true,
+            );
+          }(),
+          Future<void>.delayed(SyncRules.signOutUploadTimeout),
+        ]);
       }
-      await driveSync.pushBackup(json, interactive: true);
-      await driveSync.verifyRemoteContains(json, interactive: true);
     } catch (_) {
-      // Still sign out; local SQLite + safety snapshot remain for next login.
+      // Local DB + safety snapshot remain.
     }
 
     await driveSync.signOut();
     vaultLoaded = false;
     loginSuccessMessage = null;
-    // Clear UI only — IndexedDB/SQLite transactions stay on this device.
     categories = [];
     recent = [];
     filteredTransactions = [];

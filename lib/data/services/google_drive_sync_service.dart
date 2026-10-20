@@ -8,6 +8,7 @@ import 'package:googleapis/drive/v3.dart' as drive;
 import 'package:shared_preferences/shared_preferences.dart';
 
 import '../../core/google_auth_config.dart';
+import '../../core/sync_rules.dart';
 import 'backup_service.dart';
 
 enum DriveSyncStatus { idle, syncing, signedOut, error }
@@ -38,8 +39,12 @@ class GoogleDriveSyncService extends ChangeNotifier {
   bool _manualSyncLock = false;
   bool _authBusy = false;
   bool _lightweightAttempted = false;
+  bool _syncCycleBusy = false;
   GoogleSignInClientAuthorization? _driveAuth;
   static const _pendingPushPrefsKey = 'drive_sync_pending_push';
+
+  /// Called when a background merge produced JSON this device should apply.
+  Future<void> Function(String mergedJson)? onVaultMerged;
 
   bool get isSignedIn => account != null;
   String? get email => account?.email ?? lastKnownEmail;
@@ -343,60 +348,58 @@ class GoogleDriveSyncService extends ChangeNotifier {
     await prefs.setBool(_pendingPushPrefsKey, value);
   }
 
-  /// Mark vault dirty and upload to the shared Drive vault (all devices).
+  /// Mark vault dirty; after debounce run a full merge cycle (never blind push).
   void schedulePush(Future<String> Function() buildBackupJson) {
     _pendingBackupBuilder = buildBackupJson;
     unawaited(_setPendingPush(true));
     unawaited(markLocalChanged());
     _pushDebounce?.cancel();
-    // Quiet background upload — no alarming UI while the debounce runs.
-    _pushDebounce = Timer(const Duration(seconds: 1), () {
+    _pushDebounce = Timer(SyncRules.editDebounce, () {
       unawaited(autoFlushAfterEdit());
     });
   }
 
   int _autoFlushAttempts = 0;
 
-  /// After an edit: upload to the shared vault (no Google account chooser).
+  /// After an edit: merge with Drive, then upload — peer devices, no blind push.
   Future<void> autoFlushAfterEdit() async {
     final builder = _pendingBackupBuilder;
     if (builder == null) return;
 
     if (!isSignedIn) {
-      // Silent only — never open One Tap from background (causes mobile loops).
       await restoreGoogleSession(
         timeout: const Duration(seconds: 3),
         allowPrompt: false,
       );
     }
     if (!isSignedIn) {
-      _autoFlushAttempts++;
-      if (_autoFlushAttempts <= 5) {
-        _pushDebounce?.cancel();
-        _pushDebounce = Timer(const Duration(seconds: 8), () {
-          unawaited(autoFlushAfterEdit());
-        });
-      }
+      _scheduleAutoFlushRetry();
       return;
     }
 
     try {
-      final json = await builder();
-      await pushBackup(json, interactive: false);
-      await _setPendingPush(false);
-      _autoFlushAttempts = 0;
-      lastError = null;
-      status = DriveSyncStatus.idle;
-      notifyListeners();
-    } catch (_) {
-      _autoFlushAttempts++;
-      if (_autoFlushAttempts <= 8) {
-        _pushDebounce?.cancel();
-        _pushDebounce = Timer(const Duration(seconds: 10), () {
-          unawaited(autoFlushAfterEdit());
-        });
+      final count = SyncRules.transactionCount(await builder());
+      final toRestore = await reconcile(
+        buildBackupJson: builder,
+        localTransactionCount: count,
+        interactive: false,
+      );
+      if (toRestore != null && onVaultMerged != null) {
+        await onVaultMerged!(toRestore);
       }
+      _autoFlushAttempts = 0;
+    } catch (_) {
+      _scheduleAutoFlushRetry();
     }
+  }
+
+  void _scheduleAutoFlushRetry() {
+    _autoFlushAttempts++;
+    if (_autoFlushAttempts > 8) return;
+    _pushDebounce?.cancel();
+    _pushDebounce = Timer(SyncRules.pendingRetryInterval, () {
+      unawaited(autoFlushAfterEdit());
+    });
   }
 
   /// Upload the full local vault if there are pending edits (or [force]).
@@ -494,7 +497,7 @@ class GoogleDriveSyncService extends ChangeNotifier {
     );
   }
 
-  /// Pull / merge / push so both devices keep their transactions.
+  /// Pull / merge / push using [SyncRules]. Devices are peers.
   ///
   /// [safetyJson] — optional on-device snapshot (survives bad pulls / sign-out).
   Future<String?> reconcile({
@@ -504,9 +507,13 @@ class GoogleDriveSyncService extends ChangeNotifier {
     bool interactive = false,
   }) async {
     if (!isSignedIn) return null;
+    if (_syncCycleBusy) return null;
+    _syncCycleBusy = true;
     status = DriveSyncStatus.syncing;
-    lastError = null;
-    notifyListeners();
+    if (interactive) {
+      lastError = null;
+      notifyListeners();
+    }
 
     try {
       await _ensureDriveAuthorized(interactive: interactive);
@@ -516,7 +523,6 @@ class GoogleDriveSyncService extends ChangeNotifier {
 
       final result = await _applySyncDecision(
         localJson: localJson,
-        localTransactionCount: localTransactionCount,
         remote: remote,
         prevRemoteJson: prev,
         safetyJson: safetyJson,
@@ -529,20 +535,23 @@ class GoogleDriveSyncService extends ChangeNotifier {
       return result;
     } catch (e) {
       final friendly = _friendlyGoogleError(e);
-      lastError = friendly ??
-          (interactive ? 'Sync failed. Try again.' : 'Sync paused. Tap Sync now.');
-      status = DriveSyncStatus.error;
-      notifyListeners();
-      if (interactive && friendly == null) rethrow;
+      if (interactive) {
+        lastError = friendly ?? 'Sync failed. Try again.';
+        status = DriveSyncStatus.error;
+        notifyListeners();
+        if (friendly == null) rethrow;
+      } else {
+        status = DriveSyncStatus.idle;
+      }
       return null;
+    } finally {
+      _syncCycleBusy = false;
     }
   }
 
-  /// Merge local + Drive + Drive.prev + safety, then push the richest vault.
-  /// Returns JSON the caller should restore, or null if local already matches.
+  /// Merge all sources, then apply [SyncRules.decide].
   Future<String?> _applySyncDecision({
     required String localJson,
-    required int localTransactionCount,
     required _RemoteSync? remote,
     String? prevRemoteJson,
     String? safetyJson,
@@ -560,34 +569,31 @@ class GoogleDriveSyncService extends ChangeNotifier {
     final merged = sources.length == 1
         ? localJson
         : BackupService.mergeVaultJsonAll(sources);
-    final mergedCount = _transactionCount(merged);
-    final localCount = localTransactionCount > 0
-        ? localTransactionCount
-        : _transactionCount(localJson);
-    final remoteCount = remote == null ? 0 : _transactionCount(remote.json);
 
-    // Nothing anywhere.
-    if (mergedCount == 0) {
+    final decision = SyncRules.decide(
+      localTxIds: SyncRules.transactionIds(localJson),
+      remoteTxIds:
+          remote == null ? <String>{} : SyncRules.transactionIds(remote.json),
+      mergedTxIds: SyncRules.transactionIds(merged),
+      hasPendingLocalEdits: _hasPendingPush,
+    );
+
+    if (decision.refuseUpload) {
+      if (interactive) {
+        lastError = 'Sync refused an unsafe upload. Try Sync now again.';
+        status = DriveSyncStatus.error;
+        notifyListeners();
+      }
+      return decision.restoreLocal ? merged : null;
+    }
+
+    if (SyncRules.transactionCount(merged) == 0) {
       await _markSynced();
+      await _setPendingPush(false);
       return null;
     }
 
-    final needsLocalRestore =
-        _txIdSet(merged) != _txIdSet(localJson) || mergedCount != localCount;
-    final needsRemoteUpload = remote == null ||
-        _txIdSet(merged) != _txIdSet(remote.json) ||
-        mergedCount != remoteCount ||
-        _hasPendingPush;
-
-    // Never upload a vault that drops Drive transactions (merge already prevents
-    // this; still guard against empty/corrupt local overwriting Drive).
-      if (needsRemoteUpload) {
-      if (remoteCount > 0 && mergedCount < remoteCount) {
-        lastError = 'Sync refused to upload an older vault. Tap Sync now again.';
-        status = DriveSyncStatus.error;
-        notifyListeners();
-        return needsLocalRestore ? merged : null;
-      }
+    if (decision.uploadRemote) {
       await markLocalChanged();
       try {
         await pushBackup(merged, interactive: interactive);
@@ -605,23 +611,10 @@ class GoogleDriveSyncService extends ChangeNotifier {
       await _setPendingPush(false);
     }
 
-    return needsLocalRestore ? merged : null;
+    return decision.restoreLocal ? merged : null;
   }
 
-  Set<String> _txIdSet(String json) {
-    try {
-      final decoded = jsonDecode(json);
-      if (decoded is! Map) return {};
-      final txs = decoded['transactions'];
-      if (txs is! List) return {};
-      return txs
-          .map((e) => e is Map ? '${e['id'] ?? ''}' : '')
-          .where((id) => id.isNotEmpty)
-          .toSet();
-    } catch (_) {
-      return {};
-    }
-  }
+  Set<String> _txIdSet(String json) => SyncRules.transactionIds(json);
 
   Future<void> pushBackup(
     String backupJson, {
@@ -705,7 +698,6 @@ class GoogleDriveSyncService extends ChangeNotifier {
       final localJson = await buildBackupJson();
       final toRestore = await _applySyncDecision(
         localJson: localJson,
-        localTransactionCount: localTransactionCount,
         remote: remote,
         prevRemoteJson: prev,
         safetyJson: safetyJson,
@@ -732,18 +724,8 @@ class GoogleDriveSyncService extends ChangeNotifier {
     }
   }
 
-  bool _remoteHasTransactions(String json) => _transactionCount(json) > 0;
-
-  int _transactionCount(String json) {
-    try {
-      final decoded = jsonDecode(json);
-      if (decoded is! Map) return 0;
-      final txs = decoded['transactions'];
-      return txs is List ? txs.length : 0;
-    } catch (_) {
-      return 0;
-    }
-  }
+  bool _remoteHasTransactions(String json) =>
+      SyncRules.transactionCount(json) > 0;
 
   String _wrapBackup(String backupJson, DateTime updatedAt) {
     final decoded = jsonDecode(backupJson);

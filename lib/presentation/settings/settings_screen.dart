@@ -348,9 +348,9 @@ class SettingsScreen extends StatelessWidget {
           leading: const Icon(Icons.schedule_outlined),
           title: const Text('When data is saved'),
           subtitle: const Text(
-            'Your account vault updates automatically after each edit (~1s), '
-            'about every 2 minutes while open, when you reopen the app, and before sign-out. '
-            'All signed-in browsers share the same data.',
+            'Shared account vault: merge+upload after each edit, pull about every '
+            'minute while open, on reopen, and Sync now. Devices are peers — '
+            'no phone or Mac is primary. Sign-out syncs briefly then exits.',
           ),
         ),
         ListTile(
