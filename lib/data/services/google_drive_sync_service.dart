@@ -67,7 +67,10 @@ class GoogleDriveSyncService extends ChangeNotifier {
           notifyListeners();
       }
     }, onError: (Object e) {
-      lastError = e.toString();
+      // Ignore transient popup/UI noise (common on Safari / Home Screen).
+      final friendly = _friendlyGoogleError(e);
+      if (friendly == null) return;
+      lastError = friendly;
       status = DriveSyncStatus.error;
       notifyListeners();
     });
@@ -103,10 +106,39 @@ class GoogleDriveSyncService extends ChangeNotifier {
     }
     account = user;
     status = DriveSyncStatus.idle;
-    lastError = null;
+    lastError = null; // clear prior popup / deny errors after a good login
     await _rememberSignedIn(user.email);
     await dismissPrompt();
     notifyListeners();
+  }
+
+  void clearLastError() {
+    lastError = null;
+    if (status == DriveSyncStatus.error && isSignedIn) {
+      status = DriveSyncStatus.idle;
+    }
+    notifyListeners();
+  }
+
+  /// Returns a user-facing message, or null to ignore the error entirely.
+  static String? _friendlyGoogleError(Object e) {
+    final text = e.toString();
+    final lower = text.toLowerCase();
+    if (e is GoogleSignInException) {
+      if (e.code == GoogleSignInExceptionCode.uiUnavailable ||
+          lower.contains('popup') ||
+          lower.contains('uiunavailable')) {
+        return 'Google popup was blocked. Use Safari (not a tiny in-app browser), '
+            'allow popups for this site, then tap Sync now.';
+      }
+      if (e.code == GoogleSignInExceptionCode.canceled) {
+        return null;
+      }
+    }
+    if (lower.contains('popup') || lower.contains('uiunavailable')) {
+      return 'Google popup was blocked. Allow popups for this site, then tap Sync now.';
+    }
+    return text;
   }
 
   Future<void> _rememberSignedIn(String email) async {
@@ -133,8 +165,9 @@ class GoogleDriveSyncService extends ChangeNotifier {
     }
     lastError = null;
     if (_signIn.supportsAuthenticate()) {
-      final user =
-          await _signIn.authenticate(scopeHint: GoogleAuthConfig.driveScopes);
+      final user = await _signIn.authenticate(
+        scopeHint: GoogleAuthConfig.signInScopeHint,
+      );
       await _acceptOrRejectUser(user);
       if (account == null) {
         throw StateError(lastError ?? 'Google account not allowed');
@@ -144,7 +177,13 @@ class GoogleDriveSyncService extends ChangeNotifier {
         'Use the Google Sign-In button (web requires the official button).',
       );
     }
-    await _ensureDriveAuthorized(interactive: true);
+    try {
+      await _ensureDriveAuthorized(interactive: true);
+    } catch (e) {
+      lastError = _friendlyGoogleError(e) ??
+          'Signed in. Tap Sync now if Drive access is needed.';
+      // Stay signed in — vault UI still works offline.
+    }
     notifyListeners();
   }
 
@@ -239,16 +278,19 @@ class GoogleDriveSyncService extends ChangeNotifier {
         await _markSynced();
       }
 
+      lastError = null;
       status = DriveSyncStatus.idle;
       notifyListeners();
       return null;
     } catch (e) {
-      lastError = interactive
-          ? e.toString()
-          : 'Auto-sync paused. Tap Sync now to reconnect Google Drive.';
+      final friendly = _friendlyGoogleError(e);
+      lastError = friendly ??
+          (interactive
+              ? e.toString()
+              : 'Auto-sync paused. Tap Sync now when you can allow Google.');
       status = DriveSyncStatus.error;
       notifyListeners();
-      if (interactive) rethrow;
+      if (interactive && friendly == null) rethrow;
       return null;
     }
   }
@@ -285,15 +327,18 @@ class GoogleDriveSyncService extends ChangeNotifier {
         );
       }
       await _markSynced();
+      lastError = null;
       status = DriveSyncStatus.idle;
       notifyListeners();
     } catch (e) {
-      lastError = interactive
-          ? e.toString()
-          : 'Auto-sync paused. Tap Sync now to reconnect Google Drive.';
+      final friendly = _friendlyGoogleError(e);
+      lastError = friendly ??
+          (interactive
+              ? e.toString()
+              : 'Auto-sync paused. Tap Sync now when you can allow Google.');
       status = DriveSyncStatus.error;
       notifyListeners();
-      if (interactive) rethrow;
+      if (interactive && friendly == null) rethrow;
     }
   }
 
@@ -372,19 +417,24 @@ class GoogleDriveSyncService extends ChangeNotifier {
       throw StateError('Not signed in');
     }
     final scopes = GoogleAuthConfig.driveScopes;
-    GoogleSignInClientAuthorization? auth =
-        await user.authorizationClient.authorizationForScopes(scopes);
-    if (auth == null && interactive) {
-      auth = await user.authorizationClient.authorizeScopes(scopes);
+    try {
+      GoogleSignInClientAuthorization? auth =
+          await user.authorizationClient.authorizationForScopes(scopes);
+      if (auth == null && interactive) {
+        auth = await user.authorizationClient.authorizeScopes(scopes);
+      }
+      if (auth == null) {
+        throw StateError(
+          interactive
+              ? 'Google Drive permission was not granted'
+              : 'Drive authorization expired',
+        );
+      }
+      return auth;
+    } on GoogleSignInException catch (e) {
+      final msg = _friendlyGoogleError(e);
+      throw StateError(msg ?? e.toString());
     }
-    if (auth == null) {
-      throw StateError(
-        interactive
-            ? 'Google Drive permission was not granted'
-            : 'Drive authorization expired',
-      );
-    }
-    return auth;
   }
 
   Future<void> _markSynced() async {

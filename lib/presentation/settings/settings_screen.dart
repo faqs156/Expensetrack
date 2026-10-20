@@ -337,13 +337,20 @@ class SettingsScreen extends StatelessWidget {
           },
         ),
         if (app.driveSync.lastError != null)
-          Padding(
-            padding: const EdgeInsets.only(top: 4, bottom: 8),
-            child: Text(
+          ListTile(
+            contentPadding: EdgeInsets.zero,
+            leading: Icon(
+              Icons.info_outline,
+              color: theme.colorScheme.tertiary,
+            ),
+            title: Text(
               app.driveSync.lastError!,
-              style: theme.textTheme.bodySmall?.copyWith(
-                color: theme.colorScheme.error,
-              ),
+              style: theme.textTheme.bodySmall,
+            ),
+            trailing: IconButton(
+              tooltip: 'Dismiss',
+              icon: const Icon(Icons.close),
+              onPressed: () => app.driveSync.clearLastError(),
             ),
           ),
         const Divider(height: 32),

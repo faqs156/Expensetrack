@@ -76,12 +76,26 @@ class AppController extends ChangeNotifier {
       loginSuccessMessage =
           'Signed in as ${driveSync.email}. Syncing your vault…';
       notifyListeners();
-      await _loadVaultAndSync(interactive: true);
+      // Prefer silent Drive token; fall back to one user gesture popup.
+      await _loadVaultAndSync(interactive: false);
+      if (driveSync.lastError != null) {
+        driveSync.clearLastError();
+        await _loadVaultAndSync(interactive: true);
+      }
       loginSuccessMessage =
           'Signed in as ${driveSync.email}. Your data is up to date.';
+      driveSync.clearLastError();
     } catch (e) {
-      loginSuccessMessage = 'Signed in as ${driveSync.email}, but sync failed. '
-          'Tap Sync now in Settings. ($e)';
+      // Still enter the app with local data if Drive popup was blocked.
+      if (!vaultLoaded) {
+        try {
+          await _loadVaultAndSync(interactive: false);
+        } catch (_) {}
+      }
+      loginSuccessMessage =
+          'Signed in as ${driveSync.email}. '
+          'If sync did not finish, open Settings → Sync now '
+          '(allow popups if Safari asks).';
     } finally {
       loading = false;
       notifyListeners();

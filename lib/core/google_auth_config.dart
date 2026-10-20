@@ -46,10 +46,16 @@ class GoogleAuthConfig {
     return allowedEmails.contains(email.trim().toLowerCase());
   }
 
+  /// Only Drive — used for authorizeScopes / API calls (avoid extra popups).
   static const driveScopes = <String>[
     'https://www.googleapis.com/auth/drive.appdata',
+  ];
+
+  /// Hint during authenticate() only.
+  static const signInScopeHint = <String>[
     'email',
     'openid',
+    ...driveScopes,
   ];
 
   static const syncFileName = 'expense_track_sync.json';
