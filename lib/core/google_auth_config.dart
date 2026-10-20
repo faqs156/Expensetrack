@@ -64,5 +64,8 @@ class GoogleAuthConfig {
   static const syncPrevFileName = 'expense_track_sync.prev.json';
 
   /// How often to pull/push Drive while the app is open and Google is connected.
-  static const periodicSyncInterval = Duration(minutes: 5);
+  static const periodicSyncInterval = Duration(minutes: 2);
+
+  /// Faster retry while this device still has edits not confirmed on Drive.
+  static const pendingPushRetryInterval = Duration(seconds: 45);
 }

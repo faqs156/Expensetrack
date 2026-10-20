@@ -1,6 +1,6 @@
 import 'dart:async';
 
-import 'package:flutter/foundation.dart';
+import 'package:flutter/widgets.dart';
 import 'package:google_sign_in/google_sign_in.dart';
 
 import '../core/date_keys.dart';
@@ -19,7 +19,7 @@ import '../data/services/data_survival_service.dart';
 import '../data/services/google_drive_sync_service.dart';
 import '../data/services/vault_safety_service.dart';
 
-class AppController extends ChangeNotifier {
+class AppController extends ChangeNotifier with WidgetsBindingObserver {
   AppController({
     CategoryRepository? categories,
     TransactionRepository? transactions,
@@ -41,9 +41,16 @@ class AppController extends ChangeNotifier {
     _csv = csv ??
         CsvService(transactions: _transactions, categories: _categories);
     this.driveSync.addListener(_onDriveSyncChanged);
+    this.driveSync.bindBackupBuilder(() => _backup.createBackupJson());
   }
 
   final VaultSafetyService _vaultSafety;
+
+  /// Show home banner: edits not on Drive yet, or Google needs reconnect.
+  bool get needsDriveUploadAttention =>
+      driveSync.hasPendingPush ||
+      driveSync.needsGoogleReconnect ||
+      driveSync.driveUploadBlocked;
 
   GoogleSignInAccount? _prevDriveAccount;
 
@@ -166,6 +173,7 @@ class AppController extends ChangeNotifier {
     vaultLoaded = false;
     notifyListeners();
     try {
+      WidgetsBinding.instance.addObserver(this);
       await driveSync.initialize();
 
       if (!GoogleAuthConfig.isConfigured) {
@@ -193,17 +201,34 @@ class AppController extends ChangeNotifier {
     }
   }
 
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    if (state == AppLifecycleState.resumed) {
+      unawaited(_syncOnResume());
+    }
+  }
+
+  Future<void> _syncOnResume() async {
+    if (!isAuthenticated) return;
+    await _syncAfterOpenInBackground();
+  }
+
   Future<void> _syncAfterOpenInBackground() async {
     try {
       if (!driveSync.isSignedIn) {
         await driveSync.restoreGoogleSession(
-          timeout: const Duration(seconds: 8),
+          timeout: const Duration(seconds: 12),
         );
       }
       if (driveSync.isSignedIn) {
         await _loadVaultAndSync(interactive: false);
+        if (driveSync.hasPendingPush) {
+          await driveSync.flushPendingPush(interactive: false, force: true);
+        }
+      } else if (driveSync.hasPendingPush) {
+        // Still local-only — banner prompts Sync now.
+        needsCloudPull = false;
       }
-      // Banner only if this browser is still empty after trying to sync.
       final count = await _transactions.countAll();
       needsCloudPull = count == 0 && !driveSync.isSignedIn;
     } catch (_) {
@@ -217,16 +242,35 @@ class AppController extends ChangeNotifier {
 
   void _startPeriodicSync() {
     _periodicSyncTimer?.cancel();
+    final interval = driveSync.hasPendingPush
+        ? GoogleAuthConfig.pendingPushRetryInterval
+        : GoogleAuthConfig.periodicSyncInterval;
     _periodicSyncTimer = Timer.periodic(
-      GoogleAuthConfig.periodicSyncInterval,
+      interval,
       (_) => unawaited(_periodicSyncTick()),
     );
   }
 
   Future<void> _periodicSyncTick() async {
-    if (!isAuthenticated || !driveSync.isSignedIn) return;
+    if (!isAuthenticated) return;
     if (driveSync.status == DriveSyncStatus.syncing) return;
+
+    // Reconnect silently when possible so phone edits can reach Drive.
+    if (!driveSync.isSignedIn) {
+      await driveSync.restoreGoogleSession(
+        timeout: const Duration(seconds: 10),
+      );
+    }
+    if (!driveSync.isSignedIn) {
+      if (driveSync.hasPendingPush) notifyListeners();
+      _startPeriodicSync(); // refresh interval if pending state changed
+      return;
+    }
+
     try {
+      if (driveSync.hasPendingPush) {
+        await driveSync.flushPendingPush(interactive: false, force: true);
+      }
       final count = await _transactions.countAll();
       final safety = await _vaultSafety.readBest();
       final remoteJson = await driveSync.reconcile(
@@ -241,10 +285,12 @@ class AppController extends ChangeNotifier {
         categories = await _categories.getAll();
         await refreshDashboard();
         await refreshTransactions();
-        notifyListeners();
       }
+      notifyListeners();
     } catch (_) {
       // Keep local vault; next Sync now / interval can retry.
+    } finally {
+      _startPeriodicSync();
     }
   }
 
@@ -337,13 +383,18 @@ class AppController extends ChangeNotifier {
     _periodicSyncTimer?.cancel();
     _periodicSyncTimer = null;
 
-    // Upload + snapshot BEFORE clearing Google — never throw away local DB.
+    // Must reconnect + upload BEFORE clearing Google — local-only session
+    // was the main reason Mac never saw phone edits.
     try {
       final json = await _backup.createBackupJson();
       await _vaultSafety.save(VaultSafetyService.preSignOutId, json);
-      if (driveSync.isSignedIn) {
-        await driveSync.pushBackup(json, interactive: true);
+      if (!driveSync.isSignedIn) {
+        await driveSync.ensureGoogleConnected(
+          timeout: const Duration(seconds: 45),
+        );
       }
+      await driveSync.pushBackup(json, interactive: true);
+      await driveSync.verifyRemoteContains(json, interactive: true);
     } catch (_) {
       // Still sign out; local SQLite + safety snapshot remain for next login.
     }
@@ -370,10 +421,14 @@ class AppController extends ChangeNotifier {
       localTransactionCount: count,
       safetyJson: safety,
     );
+    // Confirm this device's txs are on Drive (phone → Mac path).
+    final localJson = await _backup.createBackupJson();
+    await driveSync.verifyRemoteContains(localJson, interactive: true);
     await refreshDashboard();
     await refreshTransactions();
     final after = await _transactions.countAll();
     needsCloudPull = after == 0 && !driveSync.isSignedIn;
+    _startPeriodicSync();
     notifyListeners();
   }
 
@@ -583,6 +638,7 @@ class AppController extends ChangeNotifier {
 
   @override
   void dispose() {
+    WidgetsBinding.instance.removeObserver(this);
     _periodicSyncTimer?.cancel();
     driveSync.removeListener(_onDriveSyncChanged);
     driveSync.dispose();

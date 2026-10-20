@@ -56,7 +56,7 @@ class HomeScreen extends StatelessWidget {
                     color: theme.colorScheme.onSurface.withValues(alpha: 0.55),
                   ),
                 ),
-                if (app.needsCloudPull) ...[
+                if (app.needsDriveUploadAttention || app.needsCloudPull) ...[
                   const SizedBox(height: 12),
                   Material(
                     color: theme.colorScheme.secondaryContainer,
@@ -66,13 +66,19 @@ class HomeScreen extends StatelessWidget {
                       child: Row(
                         children: [
                           Icon(
-                            Icons.cloud_download_outlined,
+                            app.needsDriveUploadAttention
+                                ? Icons.cloud_upload_outlined
+                                : Icons.cloud_download_outlined,
                             color: theme.colorScheme.onSecondaryContainer,
                           ),
                           const SizedBox(width: 10),
                           Expanded(
                             child: Text(
-                              'No data on this device yet. Sync to load it.',
+                              app.needsDriveUploadAttention
+                                  ? (app.driveSync.needsGoogleReconnect
+                                      ? 'Google disconnected — edits are only on this device until you Sync.'
+                                      : 'Edits saved here but not confirmed on Drive yet. Sync so Mac can see them.')
+                                  : 'No data on this device yet. Sync to load it.',
                               style: theme.textTheme.bodyMedium?.copyWith(
                                 color: theme.colorScheme.onSecondaryContainer,
                               ),
@@ -91,10 +97,15 @@ class HomeScreen extends StatelessWidget {
                                     ),
                                   );
                                 }
-                              } catch (e) {
+                              } catch (_) {
                                 if (context.mounted) {
+                                  final msg = context
+                                          .read<AppController>()
+                                          .driveSync
+                                          .lastError ??
+                                      'Sync failed. Try again.';
                                   ScaffoldMessenger.of(context).showSnackBar(
-                                    SnackBar(content: Text('$e')),
+                                    SnackBar(content: Text(msg)),
                                   );
                                 }
                               }

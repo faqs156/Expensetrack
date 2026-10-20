@@ -14,13 +14,16 @@ class SettingsScreen extends StatelessWidget {
   const SettingsScreen({super.key});
 
   String _driveSyncSubtitle(AppController app) {
-    if (app.driveSync.needsGoogleReconnect) {
-      return 'Tap Sync now to connect Drive';
-    }
-    final last = app.driveSync.lastSyncedAt;
     if (app.driveSync.status == DriveSyncStatus.syncing) {
       return 'Syncing…';
     }
+    if (app.driveSync.needsGoogleReconnect) {
+      return 'Tap Sync now — Google disconnected (phone-only edits)';
+    }
+    if (app.driveSync.hasPendingPush) {
+      return 'Waiting to upload — tap Sync now';
+    }
+    final last = app.driveSync.lastSyncedAt;
     if (last == null) return 'Signed in';
     final local = last.toLocal();
     return 'Last synced ${local.year}-'

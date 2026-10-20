@@ -36,17 +36,27 @@ class GoogleDriveSyncService extends ChangeNotifier {
   Future<String> Function()? _pendingBackupBuilder;
   bool _hasPendingPush = false;
   bool _manualSyncLock = false;
+  static const _pendingPushPrefsKey = 'drive_sync_pending_push';
 
   bool get isSignedIn => account != null;
   String? get email => account?.email ?? lastKnownEmail;
   bool get hasPendingPush => _hasPendingPush;
   bool get isManualSyncing => _manualSyncLock;
 
+  /// True when this browser looks logged in but Drive uploads cannot run yet.
+  bool get driveUploadBlocked => hasPendingPush && !isSignedIn;
+
+  /// Wire the vault JSON builder so pending uploads survive a page reload.
+  void bindBackupBuilder(Future<String> Function() buildBackupJson) {
+    _pendingBackupBuilder = buildBackupJson;
+  }
+
   Future<void> initialize() async {
     if (_initialized) return;
     final prefs = await SharedPreferences.getInstance();
     promptDismissed = prefs.getBool('drive_sync_prompt_dismissed') ?? false;
     lastKnownEmail = prefs.getString('drive_sync_last_email');
+    _hasPendingPush = prefs.getBool(_pendingPushPrefsKey) ?? false;
     final localMs = prefs.getInt('drive_sync_local_updated_ms');
     if (localMs != null) {
       localUpdatedAt = DateTime.fromMillisecondsSinceEpoch(localMs, isUtc: true);
@@ -262,20 +272,54 @@ class GoogleDriveSyncService extends ChangeNotifier {
     notifyListeners();
   }
 
+  Future<void> _setPendingPush(bool value) async {
+    _hasPendingPush = value;
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.setBool(_pendingPushPrefsKey, value);
+  }
+
   /// Mark local vault dirty and upload full snapshot (txs, budgets, etc.) to Drive.
   void schedulePush(Future<String> Function() buildBackupJson) {
     _pendingBackupBuilder = buildBackupJson;
-    _hasPendingPush = true;
+    unawaited(_setPendingPush(true));
     unawaited(markLocalChanged());
+    _pushDebounce?.cancel();
+    _pushDebounce = Timer(const Duration(seconds: 2), () {
+      unawaited(autoFlushAfterEdit());
+    });
+    notifyListeners();
+  }
+
+  /// After an edit: restore Google if needed, upload, then verify Drive has the txs.
+  Future<void> autoFlushAfterEdit() async {
+    final builder = _pendingBackupBuilder;
+    if (builder == null) return;
+
     if (!isSignedIn) {
-      // Local session can keep editing; Sync now / reconnect will flush.
+      await restoreGoogleSession(timeout: const Duration(seconds: 12));
+    }
+    if (!isSignedIn) {
+      lastError =
+          'Saved on this device only. Tap Sync now to upload to Google Drive.';
+      status = DriveSyncStatus.error;
       notifyListeners();
       return;
     }
-    _pushDebounce?.cancel();
-    _pushDebounce = Timer(const Duration(seconds: 2), () {
-      unawaited(flushPendingPush(interactive: false));
-    });
+
+    try {
+      final json = await builder();
+      await pushBackup(json, interactive: false);
+      await verifyRemoteContains(json, interactive: false);
+      await _setPendingPush(false);
+      lastError = null;
+      status = DriveSyncStatus.idle;
+      notifyListeners();
+    } catch (_) {
+      lastError =
+          'Saved on this device only. Tap Sync now to upload to Google Drive.';
+      status = DriveSyncStatus.error;
+      notifyListeners();
+    }
   }
 
   /// Upload the full local vault if there are pending edits (or [force]).
@@ -284,21 +328,78 @@ class GoogleDriveSyncService extends ChangeNotifier {
     bool force = false,
   }) async {
     final builder = _pendingBackupBuilder;
-    if (!isSignedIn) return;
     if (!force && !_hasPendingPush) return;
     if (builder == null) return;
+
+    if (!isSignedIn) {
+      if (interactive) {
+        await ensureGoogleConnected();
+      } else {
+        await restoreGoogleSession(timeout: const Duration(seconds: 12));
+      }
+    }
+    if (!isSignedIn) {
+      lastError =
+          'Saved on this device only. Tap Sync now to upload to Google Drive.';
+      status = DriveSyncStatus.error;
+      notifyListeners();
+      if (interactive) {
+        throw StateError(lastError!);
+      }
+      return;
+    }
+
     try {
-      await pushBackup(await builder(), interactive: interactive);
-      _hasPendingPush = false;
+      final json = await builder();
+      await pushBackup(json, interactive: interactive);
+      await verifyRemoteContains(json, interactive: interactive);
+      await _setPendingPush(false);
+      lastError = null;
+      status = DriveSyncStatus.idle;
+      notifyListeners();
     } catch (e) {
       if (!interactive) {
-        lastError = 'Sync paused. Tap Sync now to retry.';
+        lastError =
+            'Saved on this device only. Tap Sync now to upload to Google Drive.';
         status = DriveSyncStatus.error;
         notifyListeners();
       } else {
         rethrow;
       }
     }
+  }
+
+  /// Re-download Drive and ensure every local transaction id is present.
+  Future<void> verifyRemoteContains(
+    String localJson, {
+    required bool interactive,
+  }) async {
+    final localIds = _txIdSet(localJson);
+    if (localIds.isEmpty) return;
+
+    Object? lastFailure;
+    for (var attempt = 0; attempt < 3; attempt++) {
+      if (attempt > 0) {
+        await Future<void>.delayed(const Duration(milliseconds: 700));
+      }
+      try {
+        final remote = await _downloadSyncFile(interactive: interactive);
+        if (remote == null) {
+          lastFailure = StateError('Could not confirm upload. Tap Sync now.');
+          continue;
+        }
+        final remoteIds = _txIdSet(remote.json);
+        final missing =
+            localIds.where((id) => !remoteIds.contains(id)).toList();
+        if (missing.isEmpty) return;
+        lastFailure = StateError(
+          'Upload incomplete (${missing.length} missing). Tap Sync now.',
+        );
+      } catch (e) {
+        lastFailure = e;
+      }
+    }
+    throw lastFailure ?? StateError('Could not confirm upload. Tap Sync now.');
   }
 
   Future<void> markLocalChanged() async {
@@ -407,7 +508,7 @@ class GoogleDriveSyncService extends ChangeNotifier {
 
     // Never upload a vault that drops Drive transactions (merge already prevents
     // this; still guard against empty/corrupt local overwriting Drive).
-    if (needsRemoteUpload) {
+      if (needsRemoteUpload) {
       if (remoteCount > 0 && mergedCount < remoteCount) {
         lastError = 'Sync refused to upload an older vault. Tap Sync now again.';
         status = DriveSyncStatus.error;
@@ -415,10 +516,21 @@ class GoogleDriveSyncService extends ChangeNotifier {
         return needsLocalRestore ? merged : null;
       }
       await markLocalChanged();
-      await pushBackup(merged, interactive: interactive);
+      try {
+        await pushBackup(merged, interactive: interactive);
+        await verifyRemoteContains(merged, interactive: interactive);
+        await _setPendingPush(false);
+      } catch (e) {
+        await _setPendingPush(true);
+        if (interactive) rethrow;
+        lastError =
+            'Saved on this device only. Tap Sync now to upload to Google Drive.';
+        status = DriveSyncStatus.error;
+        notifyListeners();
+      }
     } else {
       await _markSynced();
-      _hasPendingPush = false;
+      await _setPendingPush(false);
     }
 
     return needsLocalRestore ? merged : null;
@@ -443,7 +555,13 @@ class GoogleDriveSyncService extends ChangeNotifier {
     String backupJson, {
     bool interactive = false,
   }) async {
-    if (!isSignedIn) return;
+    if (!isSignedIn) {
+      lastError =
+          'Saved on this device only. Tap Sync now to upload to Google Drive.';
+      status = DriveSyncStatus.error;
+      notifyListeners();
+      throw StateError(lastError!);
+    }
     status = DriveSyncStatus.syncing;
     lastError = null;
     notifyListeners();
@@ -475,17 +593,21 @@ class GoogleDriveSyncService extends ChangeNotifier {
         );
       }
       await _markSynced();
-      _hasPendingPush = false;
       lastError = null;
       status = DriveSyncStatus.idle;
       notifyListeners();
     } catch (e) {
       final friendly = _friendlyGoogleError(e);
       lastError = friendly ??
-          (interactive ? 'Sync failed. Try again.' : 'Sync paused. Tap Sync now.');
+          (interactive
+              ? 'Sync failed. Try again.'
+              : 'Saved on this device only. Tap Sync now to upload to Google Drive.');
       status = DriveSyncStatus.error;
       notifyListeners();
-      if (interactive && friendly == null) rethrow;
+      if (interactive) {
+        throw StateError(lastError ?? e.toString());
+      }
+      rethrow;
     }
   }
 
