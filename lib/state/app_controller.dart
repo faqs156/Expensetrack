@@ -68,6 +68,8 @@ class AppController extends ChangeNotifier {
     if (!becameSignedIn || !GoogleAuthConfig.isEmailAllowed(current.email)) {
       return;
     }
+    // Sync now owns the flow when it reconnects Google — don't race it.
+    if (driveSync.isManualSyncing) return;
     // Fresh login screen → full sync. Already in app → quiet background sync.
     if (!vaultLoaded) {
       unawaited(_afterGoogleSignIn());
@@ -328,11 +330,15 @@ class AppController extends ChangeNotifier {
     final count = await _transactions.countAll();
     await driveSync.syncNow(
       buildBackupJson: _backup.createBackupJson,
-      restoreBackup: restoreBackup,
+      restoreBackup: (json) async {
+        await restoreBackup(json);
+      },
       localTransactionCount: count,
     );
+    await refreshDashboard();
+    await refreshTransactions();
     final after = await _transactions.countAll();
-    needsCloudPull = after == 0 && driveSync.needsGoogleReconnect;
+    needsCloudPull = after == 0 && !driveSync.isSignedIn;
     notifyListeners();
   }
 

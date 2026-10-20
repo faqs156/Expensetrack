@@ -34,10 +34,12 @@ class GoogleDriveSyncService extends ChangeNotifier {
   Timer? _pushDebounce;
   Future<String> Function()? _pendingBackupBuilder;
   bool _hasPendingPush = false;
+  bool _manualSyncLock = false;
 
   bool get isSignedIn => account != null;
   String? get email => account?.email ?? lastKnownEmail;
   bool get hasPendingPush => _hasPendingPush;
+  bool get isManualSyncing => _manualSyncLock;
 
   Future<void> initialize() async {
     if (_initialized) return;
@@ -135,7 +137,10 @@ class GoogleDriveSyncService extends ChangeNotifier {
     await dismissPrompt();
     notifyListeners();
     // Flush edits made while Google was disconnected (after refresh).
-    if (_hasPendingPush && _pendingBackupBuilder != null) {
+    // Skip when Sync now owns the flow — it will pull/push itself.
+    if (!_manualSyncLock &&
+        _hasPendingPush &&
+        _pendingBackupBuilder != null) {
       unawaited(flushPendingPush(interactive: false));
     }
   }
@@ -172,6 +177,16 @@ class GoogleDriveSyncService extends ChangeNotifier {
         lower.contains('repository secret')) {
       return 'Something went wrong. Try again.';
     }
+    // StateError / clear user messages from our own throws.
+    if (e is StateError) {
+      final msg = e.message.trim();
+      if (msg.isNotEmpty) return msg;
+    }
+    const prefix = 'Bad state: ';
+    if (text.startsWith(prefix)) {
+      final msg = text.substring(prefix.length).trim();
+      if (msg.isNotEmpty && !msg.contains('Exception')) return msg;
+    }
     return 'Something went wrong. Try again.';
   }
 
@@ -206,10 +221,8 @@ class GoogleDriveSyncService extends ChangeNotifier {
   }
 
   /// Restores a live Google session (needed for Drive). Safe to call from Sync now.
-  ///
-  /// Home can use [hasLocalSession] without this; Drive API cannot.
   Future<void> ensureGoogleConnected({
-    Duration timeout = const Duration(seconds: 90),
+    Duration timeout = const Duration(seconds: 40),
   }) async {
     if (account != null) return;
     if (!GoogleAuthConfig.isConfigured) {
@@ -223,41 +236,17 @@ class GoogleDriveSyncService extends ChangeNotifier {
       );
       await _acceptOrRejectUser(user);
       if (account == null) {
-        throw StateError(lastError ?? 'Google account not allowed');
+        throw StateError(lastError ?? 'This Google account cannot access ExpenseTrack.');
       }
       return;
     }
 
-    // Web: One Tap / FedCM (only when user taps Sync — not on every refresh).
-    final done = Completer<void>();
-    late final StreamSubscription<GoogleSignInAuthenticationEvent> sub;
-    sub = _signIn.authenticationEvents.listen((event) {
-      switch (event) {
-        case GoogleSignInAuthenticationEventSignIn():
-          if (!done.isCompleted) done.complete();
-        case GoogleSignInAuthenticationEventSignOut():
-          break;
-      }
-    }, onError: (Object e, StackTrace st) {
-      if (!done.isCompleted) {
-        done.completeError(e, st);
-      }
-    });
-
-    try {
-      await _signIn.attemptLightweightAuthentication();
-      await done.future.timeout(
-        timeout,
-        onTimeout: () {
-          throw StateError('Sign-in timed out. Try again.');
-        },
+    // Web: One Tap / FedCM. Also poll [account] — the global listener may set it.
+    final ok = await restoreGoogleSession(timeout: timeout);
+    if (!ok || account == null) {
+      throw StateError(
+        'Could not connect Google. Allow the sign-in prompt, then tap Sync now again.',
       );
-    } finally {
-      await sub.cancel();
-    }
-
-    if (account == null) {
-      throw StateError(lastError ?? 'Google account not allowed');
     }
   }
 
@@ -473,20 +462,63 @@ class GoogleDriveSyncService extends ChangeNotifier {
     required Future<void> Function(String json) restoreBackup,
     required int localTransactionCount,
   }) async {
-    // Drive needs a live Google token; home page can stay open on local session alone.
+    if (_manualSyncLock) return;
+    _manualSyncLock = true;
     _pendingBackupBuilder = buildBackupJson;
-    await ensureGoogleConnected();
-    final remoteJson = await reconcile(
-      buildBackupJson: buildBackupJson,
-      localTransactionCount: localTransactionCount,
-      interactive: true,
-    );
-    if (remoteJson != null) {
-      await restoreBackup(remoteJson);
-      _hasPendingPush = false;
-    } else if (localTransactionCount > 0 || _hasPendingPush) {
-      // Upload only when this device has something to save.
-      await flushPendingPush(interactive: true, force: true);
+    status = DriveSyncStatus.syncing;
+    lastError = null;
+    notifyListeners();
+
+    try {
+      await ensureGoogleConnected(timeout: const Duration(seconds: 40));
+      await _ensureDriveAuthorized(interactive: true);
+
+      final remote = await _downloadSyncFile(interactive: true);
+      final localJson = await buildBackupJson();
+      final localUpdated =
+          localUpdatedAt ?? DateTime.fromMillisecondsSinceEpoch(0, isUtc: true);
+
+      if (remote != null) {
+        final remoteHasTx = _remoteHasTransactions(remote.json);
+        final shouldPull = (localTransactionCount == 0 && remoteHasTx) ||
+            (remoteHasTx &&
+                remote.updatedAt.isAfter(localUpdated) &&
+                !_hasPendingPush);
+
+        if (shouldPull) {
+          await setLocalUpdatedFromRemote(remote.updatedAt);
+          await restoreBackup(remote.json);
+          _hasPendingPush = false;
+          await _markSynced();
+          status = DriveSyncStatus.idle;
+          notifyListeners();
+          return;
+        }
+      }
+
+      // Upload this device's full vault (transactions, budgets, categories, settings).
+      if (localTransactionCount > 0 ||
+          _hasPendingPush ||
+          remote == null ||
+          !_remoteHasTransactions(remote.json)) {
+        await markLocalChanged();
+        await pushBackup(localJson, interactive: true);
+      } else {
+        await _markSynced();
+        status = DriveSyncStatus.idle;
+        notifyListeners();
+      }
+    } catch (e) {
+      lastError = _friendlyGoogleError(e) ?? 'Sync failed. Try again.';
+      status = DriveSyncStatus.error;
+      notifyListeners();
+      rethrow;
+    } finally {
+      _manualSyncLock = false;
+      if (status == DriveSyncStatus.syncing) {
+        status = DriveSyncStatus.idle;
+        notifyListeners();
+      }
     }
   }
 

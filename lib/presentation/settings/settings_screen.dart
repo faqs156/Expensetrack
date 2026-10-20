@@ -32,13 +32,16 @@ class SettingsScreen extends StatelessWidget {
 
   Future<void> _syncNow(BuildContext context) async {
     final messenger = ScaffoldMessenger.of(context);
+    final app = context.read<AppController>();
     try {
-      await context.read<AppController>().syncGoogleDriveNow();
+      await app.syncGoogleDriveNow();
+      if (!context.mounted) return;
       messenger.showSnackBar(
         const SnackBar(content: Text('Sync finished')),
       );
-    } catch (e) {
-      messenger.showSnackBar(SnackBar(content: Text('Sync failed: $e')));
+    } catch (_) {
+      final msg = app.driveSync.lastError ?? 'Sync failed. Try again.';
+      messenger.showSnackBar(SnackBar(content: Text(msg)));
     }
   }
 
@@ -330,13 +333,27 @@ class SettingsScreen extends StatelessWidget {
                 ),
           title: const Text('Sync now'),
           subtitle: Text(
-            app.driveSync.hasPendingPush
-                ? 'Uploading changes…'
-                : 'Upload and download your data',
+            app.driveSync.status == DriveSyncStatus.syncing
+                ? 'Syncing…'
+                : app.driveSync.hasPendingPush
+                    ? 'Uploading changes…'
+                    : 'Download & upload with Google Drive',
           ),
           onTap: app.driveSync.status == DriveSyncStatus.syncing
               ? null
               : () => _syncNow(context),
+        ),
+        ListTile(
+          contentPadding: EdgeInsets.zero,
+          leading: const Icon(Icons.schedule_outlined),
+          title: const Text('When data is saved'),
+          subtitle: Text(
+            kIsWeb
+                ? 'Local: saved instantly in this browser’s app database (not a separate phone folder). '
+                    'Google Drive: ~2 seconds after each edit when connected, plus every 5 minutes; Sync now is immediate.'
+                : 'Phone: saved instantly in the app database; Android also copies a backup under Documents ~2 seconds after edits. '
+                    'Google Drive: ~2 seconds after each edit when connected, plus every 5 minutes; Sync now is immediate.',
+          ),
         ),
         ListTile(
           contentPadding: EdgeInsets.zero,
