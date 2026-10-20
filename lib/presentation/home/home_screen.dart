@@ -56,61 +56,6 @@ class HomeScreen extends StatelessWidget {
                     color: theme.colorScheme.onSurface.withValues(alpha: 0.55),
                   ),
                 ),
-                if (app.needsCloudPull) ...[
-                  const SizedBox(height: 12),
-                  Material(
-                    color: theme.colorScheme.secondaryContainer,
-                    borderRadius: BorderRadius.circular(12),
-                    child: Padding(
-                      padding: const EdgeInsets.fromLTRB(12, 10, 8, 10),
-                      child: Row(
-                        children: [
-                          Icon(
-                            Icons.cloud_sync_outlined,
-                            color: theme.colorScheme.onSecondaryContainer,
-                          ),
-                          const SizedBox(width: 10),
-                          Expanded(
-                            child: Text(
-                              'Loading your expenses from your account…',
-                              style: theme.textTheme.bodyMedium?.copyWith(
-                                color: theme.colorScheme.onSecondaryContainer,
-                              ),
-                            ),
-                          ),
-                          TextButton(
-                            onPressed: () async {
-                              try {
-                                await context
-                                    .read<AppController>()
-                                    .syncGoogleDriveNow();
-                                if (context.mounted) {
-                                  ScaffoldMessenger.of(context).showSnackBar(
-                                    const SnackBar(
-                                      content: Text('Synced'),
-                                    ),
-                                  );
-                                }
-                              } catch (_) {
-                                if (context.mounted) {
-                                  final msg = context
-                                          .read<AppController>()
-                                          .driveSync
-                                          .lastError ??
-                                      'Sync failed. Try again.';
-                                  ScaffoldMessenger.of(context).showSnackBar(
-                                    SnackBar(content: Text(msg)),
-                                  );
-                                }
-                              }
-                            },
-                            child: const Text('Sync'),
-                          ),
-                        ],
-                      ),
-                    ),
-                  ),
-                ],
                 const SizedBox(height: 16),
                 Row(
                   children: [

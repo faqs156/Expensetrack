@@ -36,6 +36,9 @@ class GoogleDriveSyncService extends ChangeNotifier {
   Future<String> Function()? _pendingBackupBuilder;
   bool _hasPendingPush = false;
   bool _manualSyncLock = false;
+  bool _authBusy = false;
+  bool _lightweightAttempted = false;
+  GoogleSignInClientAuthorization? _driveAuth;
   static const _pendingPushPrefsKey = 'drive_sync_pending_push';
 
   bool get isSignedIn => account != null;
@@ -77,6 +80,7 @@ class GoogleDriveSyncService extends ChangeNotifier {
           unawaited(_acceptOrRejectUser(event.user));
         case GoogleSignInAuthenticationEventSignOut():
           account = null;
+          _driveAuth = null;
           status = DriveSyncStatus.signedOut;
           notifyListeners();
       }
@@ -89,8 +93,16 @@ class GoogleDriveSyncService extends ChangeNotifier {
       notifyListeners();
     });
 
-    // Kick One Tap in the background — do not block app startup.
-    unawaited(restoreGoogleSession(timeout: const Duration(seconds: 8)));
+    // Only silent-restore when this browser already has a session.
+    // Fresh login uses the GIS button once — do not also open One Tap.
+    if (hasLocalSession) {
+      unawaited(
+        restoreGoogleSession(
+          timeout: const Duration(seconds: 8),
+          allowPrompt: false,
+        ),
+      );
+    }
 
     _initialized = true;
     if (account == null) {
@@ -99,25 +111,45 @@ class GoogleDriveSyncService extends ChangeNotifier {
     notifyListeners();
   }
 
-  /// One Tap / silent restore. Returns true when a live Google session exists.
+  /// Restore a live Google session. [allowPrompt] false = poll only / no One Tap.
   Future<bool> restoreGoogleSession({
     Duration timeout = const Duration(seconds: 8),
+    bool allowPrompt = false,
+    bool forcePrompt = false,
   }) async {
     if (account != null) return true;
-    try {
-      final restored = await _signIn.attemptLightweightAuthentication();
-      if (restored != null) {
-        await _acceptOrRejectUser(restored);
+    if (_authBusy) {
+      final deadline = DateTime.now().add(timeout);
+      while (account == null && DateTime.now().isBefore(deadline)) {
+        await Future<void>.delayed(const Duration(milliseconds: 200));
       }
-    } catch (_) {
-      // Continue waiting — web One Tap completes via authenticationEvents.
+      return account != null;
     }
 
-    final deadline = DateTime.now().add(timeout);
-    while (account == null && DateTime.now().isBefore(deadline)) {
-      await Future<void>.delayed(const Duration(milliseconds: 200));
+    _authBusy = true;
+    try {
+      final shouldPrompt =
+          allowPrompt && (forcePrompt || !_lightweightAttempted);
+      if (shouldPrompt) {
+        _lightweightAttempted = true;
+        try {
+          final restored = await _signIn.attemptLightweightAuthentication();
+          if (restored != null) {
+            await _acceptOrRejectUser(restored);
+          }
+        } catch (_) {
+          // Web One Tap may complete via authenticationEvents.
+        }
+      }
+
+      final deadline = DateTime.now().add(timeout);
+      while (account == null && DateTime.now().isBefore(deadline)) {
+        await Future<void>.delayed(const Duration(milliseconds: 200));
+      }
+      return account != null;
+    } finally {
+      _authBusy = false;
     }
-    return account != null;
   }
 
   /// Allowlisted email from this browser (survives refresh even if Google UI did not).
@@ -218,12 +250,24 @@ class GoogleDriveSyncService extends ChangeNotifier {
       throw StateError('Sign-in is unavailable right now.');
     }
     lastError = null;
-    await ensureGoogleConnected();
+    // Web: the official GIS button already signed the user in via
+    // authenticationEvents. Native: authenticate() once.
+    if (account == null && _signIn.supportsAuthenticate()) {
+      await ensureGoogleConnected();
+    } else if (account == null) {
+      // Wait briefly for the GIS button event — do not open a second chooser.
+      final ok = await restoreGoogleSession(
+        timeout: const Duration(seconds: 20),
+        allowPrompt: false,
+      );
+      if (!ok) {
+        throw StateError('Choose your Google account with the Sign in button.');
+      }
+    }
     try {
       await _ensureDriveAuthorized(interactive: true);
     } catch (e) {
       lastError = _friendlyGoogleError(e) ?? 'Could not connect. Try Sync now.';
-      // Stay signed in — vault UI still works offline.
     }
     notifyListeners();
   }
@@ -231,6 +275,7 @@ class GoogleDriveSyncService extends ChangeNotifier {
   /// Restores a live Google session (needed for Drive). Safe to call from Sync now.
   Future<void> ensureGoogleConnected({
     Duration timeout = const Duration(seconds: 40),
+    bool allowPrompt = false,
   }) async {
     if (account != null) return;
     if (!GoogleAuthConfig.isConfigured) {
@@ -239,27 +284,50 @@ class GoogleDriveSyncService extends ChangeNotifier {
     lastError = null;
 
     if (_signIn.supportsAuthenticate()) {
-      final user = await _signIn.authenticate(
-        scopeHint: GoogleAuthConfig.signInScopeHint,
-      );
-      await _acceptOrRejectUser(user);
+      if (_authBusy) {
+        final ok = await restoreGoogleSession(
+          timeout: timeout,
+          allowPrompt: false,
+        );
+        if (!ok || account == null) {
+          throw StateError(lastError ?? 'Could not connect Google.');
+        }
+        return;
+      }
+      _authBusy = true;
+      try {
+        final user = await _signIn.authenticate(
+          scopeHint: GoogleAuthConfig.signInScopeHint,
+        );
+        await _acceptOrRejectUser(user);
+      } finally {
+        _authBusy = false;
+      }
       if (account == null) {
         throw StateError(lastError ?? 'This Google account cannot access ExpenseTrack.');
       }
       return;
     }
 
-    // Web: One Tap / FedCM. Also poll [account] — the global listener may set it.
-    final ok = await restoreGoogleSession(timeout: timeout);
+    // Web: only Sync now may prompt; login uses the GIS button alone.
+    final ok = await restoreGoogleSession(
+      timeout: timeout,
+      allowPrompt: allowPrompt,
+      forcePrompt: allowPrompt,
+    );
     if (!ok || account == null) {
       throw StateError(
-        'Could not connect Google. Allow the sign-in prompt, then tap Sync now again.',
+        allowPrompt
+            ? 'Choose your Google account when prompted, then try again.'
+            : 'Tap Sign in with Google, choose your account once, then try again.',
       );
     }
   }
 
   Future<void> signOut() async {
     _pushDebounce?.cancel();
+    _driveAuth = null;
+    _lightweightAttempted = false;
     await _signIn.signOut();
     account = null;
     lastKnownEmail = null;
@@ -289,16 +357,19 @@ class GoogleDriveSyncService extends ChangeNotifier {
 
   int _autoFlushAttempts = 0;
 
-  /// After an edit: restore Google if needed and upload to the shared vault.
+  /// After an edit: upload to the shared vault (no Google account chooser).
   Future<void> autoFlushAfterEdit() async {
     final builder = _pendingBackupBuilder;
     if (builder == null) return;
 
     if (!isSignedIn) {
-      await restoreGoogleSession(timeout: const Duration(seconds: 15));
+      // Silent only — never open One Tap from background (causes mobile loops).
+      await restoreGoogleSession(
+        timeout: const Duration(seconds: 3),
+        allowPrompt: false,
+      );
     }
     if (!isSignedIn) {
-      // Keep retrying quietly — do not brand this as "phone-only".
       _autoFlushAttempts++;
       if (_autoFlushAttempts <= 5) {
         _pushDebounce?.cancel();
@@ -319,7 +390,6 @@ class GoogleDriveSyncService extends ChangeNotifier {
       notifyListeners();
     } catch (_) {
       _autoFlushAttempts++;
-      // Silent retry — Sync now remains available in Settings.
       if (_autoFlushAttempts <= 8) {
         _pushDebounce?.cancel();
         _pushDebounce = Timer(const Duration(seconds: 10), () {
@@ -342,7 +412,10 @@ class GoogleDriveSyncService extends ChangeNotifier {
       if (interactive) {
         await ensureGoogleConnected();
       } else {
-        await restoreGoogleSession(timeout: const Duration(seconds: 15));
+        await restoreGoogleSession(
+          timeout: const Duration(seconds: 3),
+          allowPrompt: false,
+        );
       }
     }
     if (!isSignedIn) {
@@ -621,7 +694,10 @@ class GoogleDriveSyncService extends ChangeNotifier {
     notifyListeners();
 
     try {
-      await ensureGoogleConnected(timeout: const Duration(seconds: 40));
+      await ensureGoogleConnected(
+        timeout: const Duration(seconds: 40),
+        allowPrompt: true,
+      );
       await _ensureDriveAuthorized(interactive: true);
 
       final remote = await _downloadSyncFile(interactive: true);
@@ -780,22 +856,23 @@ class GoogleDriveSyncService extends ChangeNotifier {
     if (user == null) {
       throw StateError('Not signed in');
     }
+    if (_driveAuth != null) return _driveAuth!;
+
     final scopes = GoogleAuthConfig.driveScopes;
     try {
       GoogleSignInClientAuthorization? auth =
           await user.authorizationClient.authorizationForScopes(scopes);
-      // Prefer authorizeScopes even for background sync — usually silent when
-      // Drive was already granted on this browser.
-      if (auth == null) {
-        try {
-          auth = await user.authorizationClient.authorizeScopes(scopes);
-        } catch (e) {
-          if (!interactive) {
-            throw StateError('Sync reconnect needed');
-          }
-          rethrow;
-        }
+      // Background sync must NEVER call authorizeScopes — on mobile Chrome it
+      // re-opens the account picker in a loop.
+      if (auth == null && interactive) {
+        auth = await user.authorizationClient.authorizeScopes(scopes);
       }
+      if (auth == null) {
+        throw StateError(
+          interactive ? 'Permission not granted. Try Sync now.' : 'Sync reconnect needed',
+        );
+      }
+      _driveAuth = auth;
       return auth;
     } on GoogleSignInException catch (e) {
       final msg = _friendlyGoogleError(e);

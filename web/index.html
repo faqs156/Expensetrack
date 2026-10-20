@@ -57,9 +57,10 @@
     });
 
     // Custom offline SW (Flutter's default SW now only uninstalls itself).
+    // ?v= bumps registration so phones drop a stuck old worker/banner build.
     if ('serviceWorker' in navigator) {
       window.addEventListener('load', function () {
-        navigator.serviceWorker.register('offline_sw.js').catch(function (err) {
+        navigator.serviceWorker.register('offline_sw.js?v=3').catch(function (err) {
           console.warn('ExpenseTrack SW registration failed', err);
         });
       });

@@ -211,7 +211,8 @@ class AppController extends ChangeNotifier with WidgetsBindingObserver {
     try {
       if (!driveSync.isSignedIn) {
         await driveSync.restoreGoogleSession(
-          timeout: const Duration(seconds: 12),
+          timeout: const Duration(seconds: 8),
+          allowPrompt: false,
         );
       }
       if (driveSync.isSignedIn) {
@@ -252,7 +253,8 @@ class AppController extends ChangeNotifier with WidgetsBindingObserver {
     // Reconnect silently when possible so phone edits can reach Drive.
     if (!driveSync.isSignedIn) {
       await driveSync.restoreGoogleSession(
-        timeout: const Duration(seconds: 10),
+        timeout: const Duration(seconds: 5),
+        allowPrompt: false,
       );
     }
     if (!driveSync.isSignedIn) {
