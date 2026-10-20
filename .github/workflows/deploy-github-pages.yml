@@ -1,0 +1,69 @@
+# Deploy ExpenseTrack Flutter Web PWA to GitHub Pages.
+# Repo: faqs156/Expensetrack → https://faqs156.github.io/Expensetrack/
+name: Deploy GitHub Pages
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: pages
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Flutter
+        uses: subosito/flutter-action@v2
+        with:
+          channel: stable
+          cache: true
+
+      - name: Dependencies
+        run: flutter pub get
+
+      - name: Ensure SQLite web assets
+        run: |
+          if [ ! -f web/sqlite3.wasm ] || [ ! -f web/sqflite_sw.js ]; then
+            dart run sqflite_common_ffi_web:setup --force || ./tool/setup_web_sqlite.sh
+          fi
+          test -f web/sqlite3.wasm && test -f web/sqflite_sw.js
+
+      - name: Analyze
+        run: flutter analyze
+
+      - name: Test
+        run: flutter test
+
+      - name: Build web (GitHub Pages subpath)
+        # Note: --pwa-strategy is deprecated; offline caching uses web/offline_sw.js
+        run: |
+          flutter build web --release \
+            --base-href /Expensetrack/
+
+
+      - name: Upload Pages artifact
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: build/web
+
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - name: Deploy to GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@v4

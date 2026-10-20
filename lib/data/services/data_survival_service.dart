@@ -1,18 +1,22 @@
 import 'dart:async';
-import 'dart:io';
 
+import 'package:flutter/foundation.dart';
 import 'package:flutter/services.dart';
 
 /// Helps recover data after uninstall/reinstall on Android via:
 /// 1) Google Auto Backup scheduling
 /// 2) A JSON copy under Documents/ExpenseTrack that survives uninstall
+///
+/// Disabled on web — must not import `dart:io` (throws Platform._operatingSystem).
 class DataSurvivalService {
   static const _channel =
       MethodChannel('com.expensetrack.expense_track/data_survival');
 
   Timer? _debounce;
 
-  bool get isSupported => Platform.isAndroid;
+  /// Native Android app only (not Flutter Web, even on Android Chrome).
+  bool get isSupported =>
+      !kIsWeb && defaultTargetPlatform == TargetPlatform.android;
 
   Future<void> scheduleCloudBackup() async {
     if (!isSupported) return;

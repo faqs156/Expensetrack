@@ -34,18 +34,35 @@ class _MainShellState extends State<MainShell> {
 
   @override
   Widget build(BuildContext context) {
+    final width = MediaQuery.sizeOf(context).width;
+    final isWide = width >= 900;
+    final maxContent = isWide ? 720.0 : double.infinity;
+
     return Scaffold(
+      // SafeArea on body + nav so iPhone Home Screen standalone respects notches.
       body: SafeArea(
-        child: IndexedStack(index: _index, children: _pages),
+        bottom: false,
+        child: Align(
+          alignment: Alignment.topCenter,
+          child: ConstrainedBox(
+            constraints: BoxConstraints(maxWidth: maxContent),
+            child: IndexedStack(index: _index, children: _pages),
+          ),
+        ),
       ),
-      floatingActionButton: FloatingActionButton(
-        onPressed: _openAdd,
-        tooltip: 'Add transaction',
-        child: const Icon(Icons.add_rounded, size: 28),
+      floatingActionButton: Padding(
+        padding: EdgeInsets.only(bottom: isWide ? 8 : 0),
+        child: FloatingActionButton.extended(
+          onPressed: _openAdd,
+          tooltip: 'Add transaction',
+          icon: const Icon(Icons.add_rounded),
+          label: const Text('Add'),
+        ),
       ),
       floatingActionButtonLocation: FloatingActionButtonLocation.endFloat,
       bottomNavigationBar: NavigationBar(
         selectedIndex: _index,
+        height: 68,
         onDestinationSelected: (i) => setState(() => _index = i),
         destinations: const [
           NavigationDestination(

@@ -1,13 +1,10 @@
-import 'dart:io';
-
-import 'package:file_picker/file_picker.dart';
+import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
-import 'package:path_provider/path_provider.dart';
 import 'package:provider/provider.dart';
-import 'package:share_plus/share_plus.dart';
 
 import '../../data/models/app_settings.dart';
+import '../../platform/file_actions.dart';
 import '../../state/app_controller.dart';
 import 'budget_screen.dart';
 import 'categories_screen.dart';
@@ -19,18 +16,30 @@ class SettingsScreen extends StatelessWidget {
     final app = context.read<AppController>();
     try {
       final csv = await app.exportCsv();
-      final dir = await getTemporaryDirectory();
-      final file = File(
-        '${dir.path}/expense_track_export_${DateTime.now().millisecondsSinceEpoch}.csv',
+      final name =
+          'expense_track_export_${DateTime.now().millisecondsSinceEpoch}.csv';
+      await FileActions.saveTextFile(
+        filename: name,
+        content: csv,
+        mimeType: 'text/csv',
+        subject: 'ExpenseTrack CSV export',
       );
-      await file.writeAsString(csv);
-      await Share.shareXFiles([
-        XFile(file.path),
-      ], subject: 'ExpenseTrack CSV export');
+      if (context.mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text(
+              kIsWeb
+                  ? 'CSV download started ($name). Save this file for your records.'
+                  : 'CSV export ready to share.',
+            ),
+          ),
+        );
+      }
     } catch (e) {
       if (context.mounted) {
-        ScaffoldMessenger.of(context)
-            .showSnackBar(SnackBar(content: Text('Export failed: $e')));
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('Export failed: $e')),
+        );
       }
     }
   }
@@ -38,55 +47,49 @@ class SettingsScreen extends StatelessWidget {
   Future<void> _importCsv(BuildContext context) async {
     final app = context.read<AppController>();
     final messenger = ScaffoldMessenger.of(context);
-    final result = await FilePicker.platform.pickFiles(
-      type: FileType.custom,
-      allowedExtensions: ['csv', 'txt'],
-      withData: true,
-    );
-    if (result == null || result.files.isEmpty) return;
-    final file = result.files.first;
-    String? content = file.bytes != null
-        ? String.fromCharCodes(file.bytes!)
-        : null;
-    if (content == null && file.path != null) {
-      content = await File(file.path!).readAsString();
-    }
-    if (content == null) {
-      messenger.showSnackBar(
-        const SnackBar(content: Text('Could not read file')),
+    try {
+      final content = await FileActions.pickTextFile(extensions: ['csv', 'txt']);
+      if (content == null) return;
+      final importResult = await app.importCsv(content);
+      final buf = StringBuffer(
+        'Imported ${importResult.imported}, skipped ${importResult.skippedDuplicates}, errors ${importResult.errors}',
       );
-      return;
+      if (importResult.errorMessages.isNotEmpty) {
+        buf.write('\n${importResult.errorMessages.join('\n')}');
+      }
+      messenger.showSnackBar(SnackBar(content: Text(buf.toString())));
+    } catch (e) {
+      messenger.showSnackBar(SnackBar(content: Text('Import failed: $e')));
     }
-    final importResult = await app.importCsv(content);
-    final buf = StringBuffer(
-      'Imported ${importResult.imported}, skipped ${importResult.skippedDuplicates}, errors ${importResult.errors}',
-    );
-    if (importResult.errorMessages.isNotEmpty) {
-      buf.write('\n${importResult.errorMessages.join('\n')}');
-    }
-    messenger.showSnackBar(SnackBar(content: Text(buf.toString())));
   }
 
   Future<void> _backup(BuildContext context) async {
     try {
       final json = await context.read<AppController>().createBackup();
-      final dir = await getTemporaryDirectory();
-      final file = File(
-        '${dir.path}/expense_track_backup_${DateTime.now().millisecondsSinceEpoch}.json',
+      final name =
+          'expense_track_backup_${DateTime.now().millisecondsSinceEpoch}.json';
+      await FileActions.saveTextFile(
+        filename: name,
+        content: json,
+        mimeType: 'application/json',
+        subject: 'ExpenseTrack backup',
       );
-      await file.writeAsString(json);
-      await Share.shareXFiles([
-        XFile(file.path),
-      ], subject: 'ExpenseTrack backup');
       if (context.mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(content: Text('Backup created successfully')),
+          SnackBar(
+            content: Text(
+              kIsWeb
+                  ? 'Backup file download started. Keep $name somewhere safe — browser storage can be cleared.'
+                  : 'Backup created successfully. Keep the shared file safe.',
+            ),
+          ),
         );
       }
     } catch (e) {
       if (context.mounted) {
-        ScaffoldMessenger.of(context)
-            .showSnackBar(SnackBar(content: Text('Backup failed: $e')));
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('Backup failed: $e')),
+        );
       }
     }
   }
@@ -97,7 +100,7 @@ class SettingsScreen extends StatelessWidget {
       builder: (ctx) => AlertDialog(
         title: const Text('Restore backup?'),
         content: const Text(
-          'This replaces all current transactions, categories, budgets, and settings with the backup contents.',
+          'This replaces all current transactions, categories, budgets, and settings with the backup contents. This cannot be undone.',
         ),
         actions: [
           TextButton(
@@ -113,30 +116,20 @@ class SettingsScreen extends StatelessWidget {
     );
     if (confirm != true || !context.mounted) return;
 
-    final result = await FilePicker.platform.pickFiles(
-      type: FileType.custom,
-      allowedExtensions: ['json'],
-      withData: true,
-    );
-    if (result == null || result.files.isEmpty) return;
-    final file = result.files.first;
-    String? content = file.bytes != null
-        ? String.fromCharCodes(file.bytes!)
-        : null;
-    if (content == null && file.path != null) {
-      content = await File(file.path!).readAsString();
-    }
-    if (content == null || !context.mounted) return;
     try {
+      final content = await FileActions.pickTextFile(extensions: ['json']);
+      if (content == null || !context.mounted) return;
       await context.read<AppController>().restoreBackup(content);
       if (context.mounted) {
-        ScaffoldMessenger.of(context)
-            .showSnackBar(const SnackBar(content: Text('Backup restored')));
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text('Backup restored')),
+        );
       }
     } catch (e) {
       if (context.mounted) {
-        ScaffoldMessenger.of(context)
-            .showSnackBar(SnackBar(content: Text('Restore failed: $e')));
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('Restore failed: $e')),
+        );
       }
     }
   }
@@ -270,17 +263,18 @@ class SettingsScreen extends StatelessWidget {
           leading: const Icon(Icons.category_outlined),
           title: const Text('Manage categories'),
           trailing: const Icon(Icons.chevron_right_rounded),
-          onTap: () => Navigator.of(
-            context,
-          ).push(MaterialPageRoute(builder: (_) => const CategoriesScreen())),
+          onTap: () => Navigator.of(context).push(
+            MaterialPageRoute(builder: (_) => const CategoriesScreen()),
+          ),
         ),
         ListTile(
           contentPadding: EdgeInsets.zero,
           leading: const Icon(Icons.account_balance_wallet_outlined),
           title: const Text('Budgets'),
           trailing: const Icon(Icons.chevron_right_rounded),
-          onTap: () => Navigator.of(context)
-              .push(MaterialPageRoute(builder: (_) => const BudgetScreen())),
+          onTap: () => Navigator.of(context).push(
+            MaterialPageRoute(builder: (_) => const BudgetScreen()),
+          ),
         ),
         const Divider(height: 32),
         Text('Data', style: theme.textTheme.titleSmall),
@@ -288,7 +282,11 @@ class SettingsScreen extends StatelessWidget {
           contentPadding: EdgeInsets.zero,
           leading: const Icon(Icons.file_upload_outlined),
           title: const Text('Export CSV'),
-          subtitle: const Text('Transactions with id, date, type, amount…'),
+          subtitle: Text(
+            kIsWeb
+                ? 'Downloads a CSV you can save or import later'
+                : 'Transactions with id, date, type, amount…',
+          ),
           onTap: () => _exportCsv(context),
         ),
         ListTile(
@@ -301,13 +299,18 @@ class SettingsScreen extends StatelessWidget {
           contentPadding: EdgeInsets.zero,
           leading: const Icon(Icons.backup_outlined),
           title: const Text('Backup data'),
-          subtitle: const Text('Full local JSON backup'),
+          subtitle: Text(
+            kIsWeb
+                ? 'Downloads a JSON backup file (not automatic cloud backup)'
+                : 'Full local JSON backup file',
+          ),
           onTap: () => _backup(context),
         ),
         ListTile(
           contentPadding: EdgeInsets.zero,
           leading: const Icon(Icons.restore_outlined),
           title: const Text('Restore backup'),
+          subtitle: const Text('Requires a previously downloaded JSON file'),
           onTap: () => _restore(context),
         ),
         ListTile(
@@ -322,13 +325,14 @@ class SettingsScreen extends StatelessWidget {
           ),
           onTap: () => _clearAll(context),
         ),
-        const ListTile(
+        ListTile(
           contentPadding: EdgeInsets.zero,
-          leading: Icon(Icons.phonelink_lock_outlined),
-          title: Text('After uninstall'),
+          leading: const Icon(Icons.info_outline),
+          title: const Text('Where data lives'),
           subtitle: Text(
-            'On uninstall, choose “Keep app data” if shown. '
-            'A copy is also kept in Documents/ExpenseTrack for restore.',
+            kIsWeb
+                ? 'SQLite in this browser (IndexedDB). Clearing Safari data deletes it. No sync across devices.'
+                : 'SQLite on this device only. Uninstall may wipe data unless you keep app data or restore a backup.',
           ),
         ),
         const Divider(height: 32),
@@ -337,25 +341,28 @@ class SettingsScreen extends StatelessWidget {
           contentPadding: EdgeInsets.zero,
           leading: Icon(Icons.info_outline),
           title: Text('ExpenseTrack'),
-          subtitle: Text('Version 1.0.0'),
+          subtitle: Text('Version 1.0.0 · Offline personal finance'),
         ),
         ListTile(
           contentPadding: EdgeInsets.zero,
           leading: const Icon(Icons.lock_outline),
           title: const Text('Privacy'),
           subtitle: const Text(
-            'Data stays on this device. Auto-backup uses local Documents + optional Android backup.',
+            'No accounts, analytics, or cloud sync. Data stays on this device/browser.',
           ),
           onTap: () {
             showDialog<void>(
               context: context,
               builder: (ctx) => AlertDialog(
                 title: const Text('Privacy'),
-                content: const Text(
-                  'ExpenseTrack stores your financial data in a local SQLite database. '
-                  'There is no login, advertising, or app cloud sync. '
-                  'To survive uninstall, the app writes a backup JSON under Documents/ExpenseTrack '
-                  'and can use Android Auto Backup / “Keep app data” when available.',
+                content: Text(
+                  kIsWeb
+                      ? 'ExpenseTrack stores your finances in a local SQLite database inside this browser (IndexedDB). '
+                          'There is no login or server sync. Export/Backup only creates a file when you tap those actions. '
+                          'Safari may clear site data under storage pressure — keep JSON backups for anything important.'
+                      : 'ExpenseTrack stores your financial data in a local SQLite database on this device. '
+                          'There is no login, advertising, or app cloud sync. '
+                          'Exports and backups are created only when you choose them.',
                 ),
                 actions: [
                   TextButton(

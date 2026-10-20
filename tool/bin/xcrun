@@ -1,0 +1,9 @@
+#!/usr/bin/env bash
+# Flutter hooks_runner sanitizes the environment (keeps PATH, drops DEVELOPER_DIR).
+# When Xcode.app is selected but its license is not accepted, real xcrun prints a
+# license error on stderr and empty stdout — objective_c's hook then crashes on
+# Iterable.first. Force Command Line Tools for all xcrun invocations on PATH.
+if [[ -d /Library/Developer/CommandLineTools ]]; then
+  export DEVELOPER_DIR="${DEVELOPER_DIR:-/Library/Developer/CommandLineTools}"
+fi
+exec /usr/bin/xcrun "$@"

@@ -1,0 +1,79 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <base href="$FLUTTER_BASE_HREF">
+
+  <meta charset="UTF-8">
+  <meta content="IE=Edge" http-equiv="X-UA-Compatible">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
+  <meta name="description" content="ExpenseTrack — offline personal expense tracker. Data stays on your device.">
+
+  <!-- PWA / Android -->
+  <meta name="theme-color" content="#0F766E">
+  <meta name="mobile-web-app-capable" content="yes">
+
+  <!-- iOS Home Screen -->
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+  <meta name="apple-mobile-web-app-title" content="ExpenseTrack">
+  <link rel="apple-touch-icon" href="icons/apple-touch-icon.png">
+
+  <link rel="icon" type="image/png" href="favicon.png"/>
+  <title>ExpenseTrack</title>
+  <link rel="manifest" href="manifest.json">
+
+  <style>
+    html, body {
+      height: 100%;
+      margin: 0;
+      background-color: #0F766E;
+    }
+    .loading {
+      position: fixed;
+      inset: 0;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      color: #F1F5F9;
+      font-family: system-ui, -apple-system, BlinkMacSystemFont, sans-serif;
+      font-size: 15px;
+      letter-spacing: 0.02em;
+    }
+  </style>
+</head>
+<body>
+  <div class="loading" id="loading">Loading ExpenseTrack…</div>
+
+  <script>
+    window.addEventListener('flutter-first-frame', function () {
+      var el = document.getElementById('loading');
+      if (el) el.remove();
+    });
+
+    // Custom offline SW (Flutter's default SW now only uninstalls itself).
+    if ('serviceWorker' in navigator) {
+      window.addEventListener('load', function () {
+        navigator.serviceWorker.register('offline_sw.js').catch(function (err) {
+          console.warn('ExpenseTrack SW registration failed', err);
+        });
+      });
+    }
+  </script>
+
+  <!--
+    Custom bootstrap: do not pass serviceWorkerSettings so Flutter does not
+    register flutter_service_worker.js (cleanup worker that unregisters SWs).
+    See https://docs.flutter.dev/platform-integration/web/initialization
+  -->
+  <script>
+    {{flutter_js}}
+    {{flutter_build_config}}
+    _flutter.loader.load({
+      onEntrypointLoaded: async function(engineInitializer) {
+        const appRunner = await engineInitializer.initializeEngine();
+        await appRunner.runApp();
+      }
+    });
+  </script>
+</body>
+</html>
