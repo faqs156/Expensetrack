@@ -4,6 +4,7 @@ import 'package:flutter/foundation.dart';
 import 'package:google_sign_in/google_sign_in.dart';
 
 import '../core/date_keys.dart';
+import '../core/google_auth_config.dart';
 import '../data/models/app_settings.dart';
 import '../data/models/budget.dart';
 import '../data/models/category.dart';
@@ -41,34 +42,49 @@ class AppController extends ChangeNotifier {
 
   GoogleSignInAccount? _prevDriveAccount;
 
-  void _onDriveSyncChanged() {
-    final current = driveSync.account;
-    if (_prevDriveAccount == null && current != null && !loading) {
-      unawaited(_afterGoogleSignIn());
-    }
-    _prevDriveAccount = current;
+  /// True only for an allowlisted signed-in Google account.
+  bool get isAuthenticated =>
+      GoogleAuthConfig.isConfigured &&
+      driveSync.isSignedIn &&
+      GoogleAuthConfig.isEmailAllowed(driveSync.email);
+
+  /// Shown once after a successful login (UI clears it).
+  String? loginSuccessMessage;
+  bool vaultLoaded = false;
+
+  void clearLoginSuccessMessage() {
+    loginSuccessMessage = null;
     notifyListeners();
   }
 
+  void _onDriveSyncChanged() {
+    final current = driveSync.account;
+    final becameSignedIn = _prevDriveAccount == null && current != null;
+    _prevDriveAccount = current;
+    notifyListeners();
+    if (becameSignedIn &&
+        GoogleAuthConfig.isEmailAllowed(current.email) &&
+        !loading) {
+      unawaited(_afterGoogleSignIn());
+    }
+  }
+
   Future<void> _afterGoogleSignIn() async {
+    loading = true;
+    notifyListeners();
     try {
-      await driveSync.dismissPrompt();
-      final count = await _transactions.countAll();
-      final remoteJson = await driveSync.reconcile(
-        buildBackupJson: _backup.createBackupJson,
-        localTransactionCount: count,
-        interactive: true,
-      );
-      if (remoteJson != null) {
-        await restoreBackup(remoteJson);
-      } else if (count > 0) {
-        await driveSync.pushBackup(
-          await _backup.createBackupJson(),
-          interactive: true,
-        );
-      }
-    } catch (_) {
-      // User can tap Sync now; local data remains usable.
+      loginSuccessMessage =
+          'Signed in as ${driveSync.email}. Syncing your vault…';
+      notifyListeners();
+      await _loadVaultAndSync(interactive: true);
+      loginSuccessMessage =
+          'Signed in as ${driveSync.email}. Your data is up to date.';
+    } catch (e) {
+      loginSuccessMessage = 'Signed in as ${driveSync.email}, but sync failed. '
+          'Tap Sync now in Settings. ($e)';
+    } finally {
+      loading = false;
+      notifyListeners();
     }
   }
 
@@ -111,49 +127,69 @@ class AppController extends ChangeNotifier {
     loading = true;
     error = null;
     pendingRestoreJson = null;
+    vaultLoaded = false;
     notifyListeners();
     try {
       await driveSync.initialize();
-      settings = await _settingsRepo.load();
-      categories = await _categories.getAll();
-      await refreshDashboard();
-      await refreshTransactions();
 
-      var count = await _transactions.countAll();
-      if (count == 0 && !restoreOfferDismissed) {
-        final surviving = await _survival.readSurvivingBackup();
-        if (surviving != null && surviving.trim().isNotEmpty) {
-          pendingRestoreJson = surviving;
-        }
+      if (!GoogleAuthConfig.isConfigured) {
+        error =
+            'Login is not configured. This build needs GOOGLE_CLIENT_ID and '
+            'GOOGLE_ALLOWED_EMAILS (GitHub Actions repository secrets).';
+        return;
       }
 
-      if (driveSync.isSignedIn) {
-        // Silent only — never pop Google UI on every app open.
-        final remoteJson = await driveSync.reconcile(
-          buildBackupJson: _backup.createBackupJson,
-          localTransactionCount: count,
-          interactive: false,
-        );
-        if (remoteJson != null) {
-          await _backup.restoreBackupJson(remoteJson);
-          settings = await _settingsRepo.load();
-          categories = await _categories.getAll();
-          await refreshDashboard();
-          await refreshTransactions();
-          count = await _transactions.countAll();
-        }
+      // Do not load or show vault data until an allowlisted user is signed in.
+      if (!isAuthenticated) {
+        return;
       }
 
-      // Keep a fresh surviving copy whenever the app starts with data.
-      if (count > 0) {
-        _persistSurvival();
-      }
+      await _loadVaultAndSync(interactive: false);
     } catch (e) {
       error = e.toString();
     } finally {
       loading = false;
       notifyListeners();
     }
+  }
+
+  Future<void> _loadVaultAndSync({required bool interactive}) async {
+    settings = await _settingsRepo.load();
+    categories = await _categories.getAll();
+    await refreshDashboard();
+    await refreshTransactions();
+
+    var count = await _transactions.countAll();
+    if (count == 0 && !restoreOfferDismissed) {
+      final surviving = await _survival.readSurvivingBackup();
+      if (surviving != null && surviving.trim().isNotEmpty) {
+        pendingRestoreJson = surviving;
+      }
+    }
+
+    final remoteJson = await driveSync.reconcile(
+      buildBackupJson: _backup.createBackupJson,
+      localTransactionCount: count,
+      interactive: interactive,
+    );
+    if (remoteJson != null) {
+      await _backup.restoreBackupJson(remoteJson);
+      settings = await _settingsRepo.load();
+      categories = await _categories.getAll();
+      await refreshDashboard();
+      await refreshTransactions();
+      count = await _transactions.countAll();
+    } else if (interactive && count > 0) {
+      await driveSync.pushBackup(
+        await _backup.createBackupJson(),
+        interactive: true,
+      );
+    }
+
+    if (count > 0) {
+      _persistSurvival();
+    }
+    vaultLoaded = true;
   }
 
   void dismissRestoreOffer() {
@@ -180,7 +216,16 @@ class AppController extends ChangeNotifier {
     // Drive reconcile runs via _onDriveSyncChanged → _afterGoogleSignIn.
   }
 
-  Future<void> signOutGoogle() => driveSync.signOut();
+  Future<void> signOutGoogle() async {
+    await driveSync.signOut();
+    vaultLoaded = false;
+    loginSuccessMessage = null;
+    categories = [];
+    recent = [];
+    filteredTransactions = [];
+    monthTotals = const MonthTotals(expensePaise: 0, incomePaise: 0);
+    notifyListeners();
+  }
 
   Future<void> syncGoogleDriveNow() async {
     final count = await _transactions.countAll();

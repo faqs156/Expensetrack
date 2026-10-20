@@ -25,9 +25,9 @@ else
 fi
 
 if [[ -n "$GOOGLE_ALLOWED_EMAILS" ]]; then
-  echo "==> GOOGLE_ALLOWED_EMAILS set (${GOOGLE_ALLOWED_EMAILS//,/; } )"
+  echo "==> GOOGLE_ALLOWED_EMAILS set"
 else
-  echo "==> GOOGLE_ALLOWED_EMAILS unset — no Google accounts can sign in"
+  echo "==> GOOGLE_ALLOWED_EMAILS unset — login will be locked"
 fi
 
 echo "==> pub get"

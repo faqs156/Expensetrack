@@ -3,7 +3,7 @@ import 'package:provider/provider.dart';
 
 import 'core/theme/app_theme.dart';
 import 'data/models/app_settings.dart';
-import 'presentation/shell/google_sign_in_prompt.dart';
+import 'presentation/auth/login_screen.dart';
 import 'presentation/shell/main_shell.dart';
 import 'presentation/shell/restore_offer_host.dart';
 import 'state/app_controller.dart';
@@ -25,9 +25,10 @@ class _AppView extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final settings = context.watch<AppController>().settings;
-    final loading = context.watch<AppController>().loading;
-    final error = context.watch<AppController>().error;
+    final app = context.watch<AppController>();
+    final settings = app.settings;
+    final loading = app.loading;
+    final error = app.error;
 
     final mode = switch (settings.theme) {
       ThemePreference.light => ThemeMode.light,
@@ -42,7 +43,26 @@ class _AppView extends StatelessWidget {
       darkTheme: AppTheme.dark(),
       themeMode: mode,
       home: loading
-          ? const Scaffold(body: Center(child: CircularProgressIndicator()))
+          ? Scaffold(
+              body: Center(
+                child: Column(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    const CircularProgressIndicator(),
+                    if (app.loginSuccessMessage != null) ...[
+                      const SizedBox(height: 16),
+                      Padding(
+                        padding: const EdgeInsets.symmetric(horizontal: 24),
+                        child: Text(
+                          app.loginSuccessMessage!,
+                          textAlign: TextAlign.center,
+                        ),
+                      ),
+                    ],
+                  ],
+                ),
+              ),
+            )
           : error != null
           ? Scaffold(
               body: Center(
@@ -54,7 +74,7 @@ class _AppView extends StatelessWidget {
                       const Icon(Icons.error_outline, size: 40),
                       const SizedBox(height: 12),
                       Text(
-                        'Failed to start: $error',
+                        error,
                         textAlign: TextAlign.center,
                       ),
                       const SizedBox(height: 16),
@@ -67,9 +87,38 @@ class _AppView extends StatelessWidget {
                 ),
               ),
             )
-          : const GoogleSignInPromptHost(
-              child: RestoreOfferHost(child: MainShell()),
-            ),
+          : !app.isAuthenticated
+          ? const LoginScreen()
+          : const _AuthenticatedApp(),
     );
+  }
+}
+
+class _AuthenticatedApp extends StatefulWidget {
+  const _AuthenticatedApp();
+
+  @override
+  State<_AuthenticatedApp> createState() => _AuthenticatedAppState();
+}
+
+class _AuthenticatedAppState extends State<_AuthenticatedApp> {
+  @override
+  void initState() {
+    super.initState();
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      final app = context.read<AppController>();
+      final msg = app.loginSuccessMessage;
+      if (msg != null && mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text(msg), duration: const Duration(seconds: 4)),
+        );
+        app.clearLoginSuccessMessage();
+      }
+    });
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return const RestoreOfferHost(child: MainShell());
   }
 }

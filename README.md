@@ -53,10 +53,10 @@ export GOOGLE_CLIENT_ID='xxxx.apps.googleusercontent.com'
 | Secret | Example | Purpose |
 |--------|---------|---------|
 | `GOOGLE_CLIENT_ID` | `xxxx.apps.googleusercontent.com` | OAuth web client |
-| `GOOGLE_ALLOWED_EMAILS` | `you@gmail.com,partner@gmail.com` | Only these accounts can sign in |
+| `GOOGLE_ALLOWED_EMAILS` | `you@gmail.com;partner@gmail.com` | Only these accounts can **open the app** |
 
-Comma-separated, no spaces required (spaces are trimmed). Case-insensitive.  
-If `GOOGLE_ALLOWED_EMAILS` is missing/empty, **nobody** can use Google sync.
+Use `;` between emails (recommended). Commas work if the secret has no broken quoting.  
+Case-insensitive. Without both secrets, the deploy **fails** and the app stays locked.
 
 After sign-in, ExpenseTrack stores `expense_track_sync.json` in Drive **appDataFolder** (hidden from My Drive). Same account on another device pulls that file.
 

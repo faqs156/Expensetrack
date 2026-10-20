@@ -62,18 +62,16 @@ jobs:
           GOOGLE_CLIENT_ID: ${{ secrets.GOOGLE_CLIENT_ID }}
           GOOGLE_ALLOWED_EMAILS: ${{ secrets.GOOGLE_ALLOWED_EMAILS }}
         run: |
-          DEFINE_ARGS=()
-          if [ -n "${GOOGLE_CLIENT_ID}" ]; then
-            DEFINE_ARGS+=(--dart-define="GOOGLE_CLIENT_ID=${GOOGLE_CLIENT_ID}")
+          if [ -z "${GOOGLE_CLIENT_ID}" ] || [ -z "${GOOGLE_ALLOWED_EMAILS}" ]; then
+            echo "::error::Both GOOGLE_CLIENT_ID and GOOGLE_ALLOWED_EMAILS repository secrets are required"
+            exit 1
           fi
-          if [ -n "${GOOGLE_ALLOWED_EMAILS}" ]; then
-            DEFINE_ARGS+=(--dart-define="GOOGLE_ALLOWED_EMAILS=${GOOGLE_ALLOWED_EMAILS}")
-          else
-            echo "Secret GOOGLE_ALLOWED_EMAILS not set — no Google accounts can sign in"
-          fi
+          # Prefer semicolons in GOOGLE_ALLOWED_EMAILS (commas are OK if quoted).
+          echo "Allowlist entries: $(echo "$GOOGLE_ALLOWED_EMAILS" | tr ',;' ' ' | wc -w | tr -d ' ')"
           flutter build web --release \
             --base-href /Expensetrack/ \
-            "${DEFINE_ARGS[@]}"
+            --dart-define="GOOGLE_CLIENT_ID=${GOOGLE_CLIENT_ID}" \
+            --dart-define="GOOGLE_ALLOWED_EMAILS=${GOOGLE_ALLOWED_EMAILS}"
 
 
       - name: Upload Pages artifact

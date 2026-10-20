@@ -3,45 +3,28 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:provider/provider.dart';
 
-import '../../core/google_auth_config.dart';
 import '../../data/models/app_settings.dart';
 import '../../data/services/google_drive_sync_service.dart';
 import '../../platform/file_actions.dart';
 import '../../state/app_controller.dart';
 import 'budget_screen.dart';
 import 'categories_screen.dart';
-import 'google_sign_in_button.dart';
 
 class SettingsScreen extends StatelessWidget {
   const SettingsScreen({super.key});
 
   String _driveSyncSubtitle(AppController app) {
-    if (!app.driveSync.isSignedIn) {
-      return 'Same Google account → same vault on every device & browser';
-    }
     final last = app.driveSync.lastSyncedAt;
     if (app.driveSync.status == DriveSyncStatus.syncing) {
       return 'Syncing with Google Drive…';
     }
-    if (last == null) return 'Signed in — tap Sync now';
+    if (last == null) return 'Logged in — vault syncs via Google Drive';
     final local = last.toLocal();
     return 'Last synced ${local.year}-'
         '${local.month.toString().padLeft(2, '0')}-'
         '${local.day.toString().padLeft(2, '0')} '
         '${local.hour.toString().padLeft(2, '0')}:'
         '${local.minute.toString().padLeft(2, '0')}';
-  }
-
-  Future<void> _signInGoogle(BuildContext context) async {
-    final messenger = ScaffoldMessenger.of(context);
-    try {
-      await context.read<AppController>().signInWithGoogle();
-      messenger.showSnackBar(
-        const SnackBar(content: Text('Signed in — Drive sync ready')),
-      );
-    } catch (e) {
-      messenger.showSnackBar(SnackBar(content: Text('Sign-in failed: $e')));
-    }
   }
 
   Future<void> _syncNow(BuildContext context) async {
@@ -321,76 +304,48 @@ class SettingsScreen extends StatelessWidget {
           ),
         ),
         const Divider(height: 32),
-        Text('Google Drive sync', style: theme.textTheme.titleSmall),
+        Text('Account', style: theme.textTheme.titleSmall),
         const SizedBox(height: 4),
-        if (!GoogleAuthConfig.isConfigured)
-          ListTile(
-            contentPadding: EdgeInsets.zero,
-            leading: const Icon(Icons.cloud_off_outlined),
-            title: const Text('Google sync not configured'),
-            subtitle: const Text(
-              'Set GOOGLE_CLIENT_ID and GOOGLE_ALLOWED_EMAILS (see README).',
+        ListTile(
+          contentPadding: EdgeInsets.zero,
+          leading: const Icon(Icons.person_outline),
+          title: Text(app.driveSync.email ?? 'Signed in'),
+          subtitle: Text(_driveSyncSubtitle(app)),
+        ),
+        ListTile(
+          contentPadding: EdgeInsets.zero,
+          leading: app.driveSync.status == DriveSyncStatus.syncing
+              ? const SizedBox(
+                  width: 24,
+                  height: 24,
+                  child: CircularProgressIndicator(strokeWidth: 2),
+                )
+              : const Icon(Icons.sync),
+          title: const Text('Sync now'),
+          subtitle: const Text('Refresh vault from Google Drive'),
+          onTap: app.driveSync.status == DriveSyncStatus.syncing
+              ? null
+              : () => _syncNow(context),
+        ),
+        ListTile(
+          contentPadding: EdgeInsets.zero,
+          leading: const Icon(Icons.logout),
+          title: const Text('Sign out'),
+          subtitle: const Text('Return to login (Drive backup is kept)'),
+          onTap: () async {
+            await context.read<AppController>().signOutGoogle();
+          },
+        ),
+        if (app.driveSync.lastError != null)
+          Padding(
+            padding: const EdgeInsets.only(top: 4, bottom: 8),
+            child: Text(
+              app.driveSync.lastError!,
+              style: theme.textTheme.bodySmall?.copyWith(
+                color: theme.colorScheme.error,
+              ),
             ),
-          )
-        else ...[
-          ListTile(
-            contentPadding: EdgeInsets.zero,
-            leading: Icon(
-              app.driveSync.isSignedIn
-                  ? Icons.cloud_done_outlined
-                  : Icons.cloud_outlined,
-            ),
-            title: Text(
-              app.driveSync.isSignedIn
-                  ? (app.driveSync.email ?? 'Signed in')
-                  : 'Not signed in',
-            ),
-            subtitle: Text(_driveSyncSubtitle(app)),
           ),
-          if (!app.driveSync.isSignedIn)
-            Align(
-              alignment: Alignment.centerLeft,
-              child: GoogleSignInButton(
-                onPressed: () => _signInGoogle(context),
-              ),
-            )
-          else ...[
-            ListTile(
-              contentPadding: EdgeInsets.zero,
-              leading: app.driveSync.status == DriveSyncStatus.syncing
-                  ? const SizedBox(
-                      width: 24,
-                      height: 24,
-                      child: CircularProgressIndicator(strokeWidth: 2),
-                    )
-                  : const Icon(Icons.sync),
-              title: const Text('Sync now'),
-              subtitle: const Text('Pull newer Drive data or upload this device'),
-              onTap: app.driveSync.status == DriveSyncStatus.syncing
-                  ? null
-                  : () => _syncNow(context),
-            ),
-            ListTile(
-              contentPadding: EdgeInsets.zero,
-              leading: const Icon(Icons.logout),
-              title: const Text('Sign out of Google'),
-              subtitle: const Text('Keeps Drive backup; stops auto-sync here'),
-              onTap: () async {
-                await context.read<AppController>().signOutGoogle();
-              },
-            ),
-          ],
-          if (app.driveSync.lastError != null)
-            Padding(
-              padding: const EdgeInsets.only(top: 4, bottom: 8),
-              child: Text(
-                app.driveSync.lastError!,
-                style: theme.textTheme.bodySmall?.copyWith(
-                  color: theme.colorScheme.error,
-                ),
-              ),
-            ),
-        ],
         const Divider(height: 32),
         Text('Data', style: theme.textTheme.titleSmall),
         ListTile(
@@ -446,27 +401,21 @@ class SettingsScreen extends StatelessWidget {
           title: const Text('Where data lives'),
           subtitle: Text(
             kIsWeb
-                ? (app.driveSync.isSignedIn
-                    ? 'Signed in: vault syncs via Google Drive app data for this account. '
-                        'Local copy still works offline.'
-                    : 'Without Google: one vault per browser on this phone. '
-                        'Sign in above to share across devices & Chrome/Safari.')
-                : 'SQLite on this device only. Uninstall may wipe data unless you keep app data or restore a backup.',
+                ? 'Logged-in vault syncs via private Google Drive app data. '
+                    'Works offline; syncs when you are online.'
+                : 'SQLite on this device; syncs to Google Drive when signed in.',
           ),
           onTap: () {
             showDialog<void>(
               context: context,
               builder: (ctx) => AlertDialog(
                 title: const Text('Your vault'),
-                content: Text(
-                  app.driveSync.isSignedIn
-                      ? 'Signed in with Google. ExpenseTrack uploads a private sync file to '
-                          'Google Drive app data (hidden from My Drive). The same account on '
-                          'another phone or browser downloads that file — last write wins.\n\n'
-                          'Offline edits stay local until the next sync.'
-                      : 'Local saves stay in this browser only.\n\n'
-                          'Sign in with Google (Settings → Google Drive sync) to use the same '
-                          'vault on every device with that account. Or use Backup / Restore JSON.',
+                content: const Text(
+                  'Only allowlisted Google accounts can open ExpenseTrack.\n\n'
+                  'After login, your vault syncs to a private Google Drive app-data file '
+                  'for that account (hidden from My Drive). Same account on another device '
+                  'gets the same data — last write wins.\n\n'
+                  'Offline edits stay on this device until the next sync.',
                 ),
                 actions: [
                   TextButton(
@@ -490,10 +439,8 @@ class SettingsScreen extends StatelessWidget {
           contentPadding: EdgeInsets.zero,
           leading: const Icon(Icons.lock_outline),
           title: const Text('Privacy'),
-          subtitle: Text(
-            app.driveSync.isSignedIn
-                ? 'Optional Google Drive sync. No ads. Local SQLite + private Drive app file.'
-                : 'Optional Google sign-in for Drive sync. Otherwise data stays on this device.',
+          subtitle: const Text(
+            'Allowlisted Google login. Local SQLite + private Drive sync. No ads.',
           ),
           onTap: () {
             showDialog<void>(

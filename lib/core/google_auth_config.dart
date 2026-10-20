@@ -1,18 +1,20 @@
-/// Google OAuth + allowlist for Sign-In / Drive sync.
+/// Google OAuth login + allowlist.
 ///
-/// Build/run:
 /// ```
 /// flutter build web \
 ///   --dart-define=GOOGLE_CLIENT_ID=xxx.apps.googleusercontent.com \
-///   --dart-define=GOOGLE_ALLOWED_EMAILS=you@gmail.com,other@gmail.com
+///   --dart-define=GOOGLE_ALLOWED_EMAILS=you@gmail.com;other@gmail.com
 /// ```
+///
+/// Prefer `;` between emails (commas can break some CI shells). Commas still work
+/// when the whole define is quoted.
 class GoogleAuthConfig {
   static const clientId = String.fromEnvironment(
     'GOOGLE_CLIENT_ID',
     defaultValue: '',
   );
 
-  /// Comma-separated Gmail addresses (case-insensitive).
+  /// Separated by `;` or `,` (case-insensitive).
   static const allowedEmailsRaw = String.fromEnvironment(
     'GOOGLE_ALLOWED_EMAILS',
     defaultValue: '',
@@ -21,11 +23,20 @@ class GoogleAuthConfig {
   static bool get isConfigured =>
       clientId.trim().isNotEmpty && allowedEmails.isNotEmpty;
 
-  /// Normalized allowlist (lowercase, trimmed, non-empty).
+  /// Normalized allowlist (lowercase).
   static Set<String> get allowedEmails {
     return allowedEmailsRaw
-        .split(',')
+        .split(RegExp(r'[,;\n]+'))
         .map((e) => e.trim().toLowerCase())
+        .map((e) {
+          // Strip accidental quotes from GitHub secrets / shell.
+          if (e.length >= 2 &&
+              ((e.startsWith('"') && e.endsWith('"')) ||
+                  (e.startsWith("'") && e.endsWith("'")))) {
+            return e.substring(1, e.length - 1).trim();
+          }
+          return e;
+        })
         .where((e) => e.isNotEmpty && e.contains('@'))
         .toSet();
   }
@@ -35,7 +46,6 @@ class GoogleAuthConfig {
     return allowedEmails.contains(email.trim().toLowerCase());
   }
 
-  /// Drive scope: hidden app-data folder (not visible in the user's My Drive).
   static const driveScopes = <String>[
     'https://www.googleapis.com/auth/drive.appdata',
     'email',
