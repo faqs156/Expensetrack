@@ -349,18 +349,24 @@ class SettingsScreen extends StatelessWidget {
           title: const Text('When data is saved'),
           subtitle: Text(
             kIsWeb
-                ? 'Local: saved instantly in this browser’s app database (not a separate phone folder). '
-                    'Google Drive: ~2 seconds after each edit when connected, plus every 5 minutes; Sync now is immediate.'
-                : 'Phone: saved instantly in the app database; Android also copies a backup under Documents ~2 seconds after edits. '
-                    'Google Drive: ~2 seconds after each edit when connected, plus every 5 minutes; Sync now is immediate.',
+                ? 'Local: instantly + safety snapshot on this device. '
+                    'Drive: ~2s after edits, every 5 min, and before sign-out. Sync merges devices and keeps a previous Drive copy.'
+                : 'Phone: instantly in the app DB + safety snapshot. '
+                    'Drive: ~2s after edits, every 5 min, and before sign-out. Sync merges devices and keeps a previous Drive copy.',
           ),
         ),
         ListTile(
           contentPadding: EdgeInsets.zero,
           leading: const Icon(Icons.logout),
           title: const Text('Sign out'),
-          subtitle: const Text('Sign out of this device'),
+          subtitle: const Text(
+            'Uploads your data first; keeps it on this device',
+          ),
           onTap: () async {
+            final messenger = ScaffoldMessenger.of(context);
+            messenger.showSnackBar(
+              const SnackBar(content: Text('Saving to Drive, then signing out…')),
+            );
             await context.read<AppController>().signOutGoogle();
           },
         ),

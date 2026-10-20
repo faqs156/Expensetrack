@@ -17,6 +17,7 @@ import '../data/services/backup_service.dart';
 import '../data/services/csv_service.dart';
 import '../data/services/data_survival_service.dart';
 import '../data/services/google_drive_sync_service.dart';
+import '../data/services/vault_safety_service.dart';
 
 class AppController extends ChangeNotifier {
   AppController({
@@ -27,6 +28,7 @@ class AppController extends ChangeNotifier {
     CsvService? csv,
     BackupService? backup,
     DataSurvivalService? survival,
+    VaultSafetyService? vaultSafety,
     GoogleDriveSyncService? driveSync,
   })  : _categories = categories ?? CategoryRepository(),
         _transactions = transactions ?? TransactionRepository(),
@@ -34,11 +36,14 @@ class AppController extends ChangeNotifier {
         _settingsRepo = settings ?? SettingsRepository(),
         _backup = backup ?? BackupService(),
         _survival = survival ?? DataSurvivalService(),
+        _vaultSafety = vaultSafety ?? VaultSafetyService(),
         driveSync = driveSync ?? GoogleDriveSyncService() {
     _csv = csv ??
         CsvService(transactions: _transactions, categories: _categories);
     this.driveSync.addListener(_onDriveSyncChanged);
   }
+
+  final VaultSafetyService _vaultSafety;
 
   GoogleSignInAccount? _prevDriveAccount;
 
@@ -223,13 +228,15 @@ class AppController extends ChangeNotifier {
     if (driveSync.status == DriveSyncStatus.syncing) return;
     try {
       final count = await _transactions.countAll();
+      final safety = await _vaultSafety.readBest();
       final remoteJson = await driveSync.reconcile(
         buildBackupJson: _backup.createBackupJson,
         localTransactionCount: count,
+        safetyJson: safety,
         interactive: false,
       );
       if (remoteJson != null) {
-        await _backup.restoreBackupJson(remoteJson);
+        await _safeRestore(remoteJson);
         settings = await _settingsRepo.load();
         categories = await _categories.getAll();
         await refreshDashboard();
@@ -239,6 +246,14 @@ class AppController extends ChangeNotifier {
     } catch (_) {
       // Keep local vault; next Sync now / interval can retry.
     }
+  }
+
+  Future<void> _safeRestore(String json) async {
+    final before = await _backup.createBackupJson();
+    await _vaultSafety.save(VaultSafetyService.preRestoreId, before);
+    await _backup.restoreBackupJson(json, mergeWithLocal: true);
+    final after = await _backup.createBackupJson();
+    await _vaultSafety.save(VaultSafetyService.latestId, after);
   }
 
   Future<void> _loadVaultFromDb() async {
@@ -265,23 +280,22 @@ class AppController extends ChangeNotifier {
       return;
     }
 
+    final safety = await _vaultSafety.readBest();
     final remoteJson = await driveSync.reconcile(
       buildBackupJson: _backup.createBackupJson,
       localTransactionCount: count,
+      safetyJson: safety,
       interactive: interactive,
     );
     if (remoteJson != null) {
-      await _backup.restoreBackupJson(remoteJson);
+      await _safeRestore(remoteJson);
       await _loadVaultFromDb();
       count = await _transactions.countAll();
-    } else if (interactive && count > 0) {
-      await driveSync.pushBackup(
-        await _backup.createBackupJson(),
-        interactive: true,
-      );
     }
 
     if (count > 0) {
+      final snap = await _backup.createBackupJson();
+      await _vaultSafety.save(VaultSafetyService.latestId, snap);
       _persistSurvival();
     }
     needsCloudPull = false;
@@ -304,6 +318,12 @@ class AppController extends ChangeNotifier {
 
   void _persistSurvival() {
     // Full vault JSON: categories, transactions, budgets, settings → Drive.
+    unawaited(() async {
+      try {
+        final json = await _backup.createBackupJson();
+        await _vaultSafety.save(VaultSafetyService.latestId, json);
+      } catch (_) {}
+    }());
     _survival.scheduleAfterChange(() => _backup.createBackupJson());
     driveSync.schedulePush(() => _backup.createBackupJson());
   }
@@ -316,9 +336,22 @@ class AppController extends ChangeNotifier {
   Future<void> signOutGoogle() async {
     _periodicSyncTimer?.cancel();
     _periodicSyncTimer = null;
+
+    // Upload + snapshot BEFORE clearing Google — never throw away local DB.
+    try {
+      final json = await _backup.createBackupJson();
+      await _vaultSafety.save(VaultSafetyService.preSignOutId, json);
+      if (driveSync.isSignedIn) {
+        await driveSync.pushBackup(json, interactive: true);
+      }
+    } catch (_) {
+      // Still sign out; local SQLite + safety snapshot remain for next login.
+    }
+
     await driveSync.signOut();
     vaultLoaded = false;
     loginSuccessMessage = null;
+    // Clear UI only — IndexedDB/SQLite transactions stay on this device.
     categories = [];
     recent = [];
     filteredTransactions = [];
@@ -328,12 +361,14 @@ class AppController extends ChangeNotifier {
 
   Future<void> syncGoogleDriveNow() async {
     final count = await _transactions.countAll();
+    final safety = await _vaultSafety.readBest();
     await driveSync.syncNow(
       buildBackupJson: _backup.createBackupJson,
       restoreBackup: (json) async {
-        await restoreBackup(json);
+        await _safeRestore(json);
       },
       localTransactionCount: count,
+      safetyJson: safety,
     );
     await refreshDashboard();
     await refreshTransactions();
@@ -507,14 +542,13 @@ class AppController extends ChangeNotifier {
   Future<String> createBackup() => _backup.createBackupJson();
 
   Future<void> restoreBackup(String json) async {
-    await _backup.restoreBackupJson(json);
+    await _safeRestore(json);
     settings = await _settingsRepo.load();
     categories = await _categories.getAll();
     await refreshDashboard();
     await refreshTransactions();
     notifyListeners();
-    // Survival only — Drive push is skipped right after a pull to avoid loops.
-    _survival.scheduleAfterChange(() => _backup.createBackupJson());
+    _persistSurvival();
   }
 
   Future<void> clearAllData() async {
@@ -547,7 +581,6 @@ class AppController extends ChangeNotifier {
     return monthTotals.expensePaise / daysElapsed;
   }
 
-  @override
   @override
   void dispose() {
     _periodicSyncTimer?.cancel();

@@ -22,8 +22,21 @@ class BackupService {
     return const JsonEncoder.withIndent('  ').convert(payload);
   }
 
-  Future<void> restoreBackupJson(String json) async {
-    final decoded = jsonDecode(json);
+  /// Restores a vault. By default **merges** with the current local DB so
+  /// Drive / Sync never deletes transactions that exist only on this device.
+  Future<void> restoreBackupJson(
+    String json, {
+    bool mergeWithLocal = true,
+  }) async {
+    var incoming = json;
+    if (mergeWithLocal) {
+      final current = await createBackupJson();
+      if (_staticTxCount(current) > 0) {
+        incoming = mergeVaultJson(current, json);
+      }
+    }
+
+    final decoded = jsonDecode(incoming);
     if (decoded is! Map<String, dynamic>) {
       throw const FormatException('Invalid backup file');
     }
@@ -61,6 +74,133 @@ class BackupService {
       }
       await batch.commit(noResult: true);
     });
+  }
+
+  static int _staticTxCount(String json) {
+    try {
+      final decoded = jsonDecode(json);
+      if (decoded is! Map) return 0;
+      final txs = decoded['transactions'];
+      return txs is List ? txs.length : 0;
+    } catch (_) {
+      return 0;
+    }
+  }
+
+  /// Merge many vault snapshots (order does not matter for transactions).
+  static String mergeVaultJsonAll(Iterable<String> jsons) {
+    String? acc;
+    for (final j in jsons) {
+      if (j.trim().isEmpty) continue;
+      acc = acc == null ? j : mergeVaultJson(acc, j);
+    }
+    if (acc == null) {
+      throw const FormatException('No vault JSON to merge');
+    }
+    return acc;
+  }
+
+  /// Merge two vault JSON snapshots so edits from different devices are kept.
+  ///
+  /// Transactions/categories conflict by id → keep newer [updated_at].
+  /// Budgets conflict by month+category → keep higher amount.
+  /// Settings conflict by key → keep [preferSide] ('local' or 'remote').
+  static String mergeVaultJson(
+    String localJson,
+    String remoteJson, {
+    String preferSettings = 'local',
+  }) {
+    final local = jsonDecode(localJson);
+    final remote = jsonDecode(remoteJson);
+    if (local is! Map || remote is! Map) {
+      throw const FormatException('Invalid backup JSON for merge');
+    }
+
+    final localMap = Map<String, dynamic>.from(local);
+    final remoteMap = Map<String, dynamic>.from(remote);
+
+    final categories = _mergeById(
+      _staticAsMaps(localMap['categories']),
+      _staticAsMaps(remoteMap['categories']),
+      idOf: (r) => '${r['id'] ?? ''}',
+      isNewer: (a, b) => _rowUpdatedMs(a) >= _rowUpdatedMs(b),
+    );
+    final transactions = _mergeById(
+      _staticAsMaps(localMap['transactions']),
+      _staticAsMaps(remoteMap['transactions']),
+      idOf: (r) => '${r['id'] ?? ''}',
+      isNewer: (a, b) => _rowUpdatedMs(a) >= _rowUpdatedMs(b),
+    );
+    final budgets = _mergeById(
+      _staticAsMaps(localMap['budgets']),
+      _staticAsMaps(remoteMap['budgets']),
+      idOf: (r) => '${r['month_key'] ?? ''}\u0000${r['category_id'] ?? ''}',
+      isNewer: (a, b) {
+        final aa = _asIntStatic(a['amount_paise'], 0);
+        final bb = _asIntStatic(b['amount_paise'], 0);
+        return aa >= bb;
+      },
+    );
+    final settings = _mergeById(
+      _staticAsMaps(localMap['settings']),
+      _staticAsMaps(remoteMap['settings']),
+      idOf: (r) => '${r['key'] ?? ''}',
+      // When processing remote rows: replace local only if we prefer remote.
+      isNewer: (incoming, existing) => preferSettings == 'remote',
+    );
+
+    final now = DateTime.now().toUtc().toIso8601String();
+    final payload = {
+      'version': 1,
+      'created_at': localMap['created_at'] ?? remoteMap['created_at'] ?? now,
+      'updated_at': now,
+      'categories': categories,
+      'transactions': transactions,
+      'budgets': budgets,
+      'settings': settings,
+      'sync_target': 'google_drive_appdata',
+    };
+    return const JsonEncoder.withIndent('  ').convert(payload);
+  }
+
+  static List<Map<String, Object?>> _staticAsMaps(dynamic value) {
+    if (value is! List) return [];
+    return value.map((e) => Map<String, Object?>.from(e as Map)).toList();
+  }
+
+  static int _asIntStatic(Object? value, int fallback) {
+    if (value == null) return fallback;
+    if (value is int) return value;
+    if (value is double) return value.round();
+    if (value is num) return value.toInt();
+    return int.tryParse('$value') ?? fallback;
+  }
+
+  static int _rowUpdatedMs(Map<String, Object?> row) {
+    return _asIntStatic(row['updated_at'], _asIntStatic(row['created_at'], 0));
+  }
+
+  static List<Map<String, Object?>> _mergeById(
+    List<Map<String, Object?>> a,
+    List<Map<String, Object?>> b, {
+    required String Function(Map<String, Object?>) idOf,
+    required bool Function(Map<String, Object?>, Map<String, Object?>) isNewer,
+  }) {
+    final out = <String, Map<String, Object?>>{};
+    for (final row in a) {
+      final id = idOf(row);
+      if (id.isEmpty) continue;
+      out[id] = row;
+    }
+    for (final row in b) {
+      final id = idOf(row);
+      if (id.isEmpty) continue;
+      final existing = out[id];
+      if (existing == null || isNewer(row, existing)) {
+        out[id] = row;
+      }
+    }
+    return out.values.toList();
   }
 
   List<Map<String, Object?>> _asMaps(dynamic value) {

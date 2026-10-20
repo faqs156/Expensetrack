@@ -60,6 +60,9 @@ class GoogleAuthConfig {
 
   static const syncFileName = 'expense_track_sync.json';
 
+  /// Previous Drive copy — used to recover if a device overwrote with older data.
+  static const syncPrevFileName = 'expense_track_sync.prev.json';
+
   /// How often to pull/push Drive while the app is open and Google is connected.
   static const periodicSyncInterval = Duration(minutes: 5);
 }

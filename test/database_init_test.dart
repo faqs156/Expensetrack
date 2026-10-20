@@ -29,7 +29,7 @@ void main() {
     await initializeDatabaseFactory();
   });
 
-  test('AppDatabase schema version 1 creates after factory init', () async {
+  test('AppDatabase schema version 2 creates after factory init', () async {
     final db = AppDatabase.instance;
     await db.close();
     db.debugSetPath(
@@ -37,7 +37,7 @@ void main() {
     );
     final database = await db.database;
     final version = await database.getVersion();
-    expect(version, 1);
+    expect(version, 2);
 
     final tables = await database.rawQuery(
       "SELECT name FROM sqlite_master WHERE type='table' ORDER BY name",
