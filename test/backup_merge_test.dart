@@ -98,6 +98,42 @@ void main() {
     expect(ids, containsAll(['a', 'b', 'c']));
   });
 
+  test('mergeVaultJson honors cleared_at wipe so Clear all stays cleared', () {
+    final wiped = jsonEncode({
+      'version': 1,
+      'cleared_at': '2026-10-20T12:00:00.000Z',
+      'categories': [],
+      'transactions': [],
+      'budgets': [],
+      'settings': [
+        {'key': 'vault_cleared_at', 'value': '2026-10-20T12:00:00.000Z'},
+      ],
+    });
+    final oldPeer = jsonEncode({
+      'version': 1,
+      'categories': [],
+      'transactions': [
+        {
+          'id': 'old-1',
+          'amount_paise': 500,
+          'updated_at': DateTime.utc(2026, 10, 19).millisecondsSinceEpoch,
+          'created_at': DateTime.utc(2026, 10, 19).millisecondsSinceEpoch,
+        },
+      ],
+      'budgets': [
+        {'month_key': '2026-10', 'category_id': '', 'amount_paise': 1000},
+      ],
+      'settings': [],
+    });
+
+    final merged =
+        jsonDecode(BackupService.mergeVaultJson(wiped, oldPeer))
+            as Map<String, dynamic>;
+    expect(merged['transactions'], isEmpty);
+    expect(merged['budgets'], isEmpty);
+    expect(merged['cleared_at'], '2026-10-20T12:00:00.000Z');
+  });
+
   test('mergeVaultJson prefers newer transaction on same id', () {
     final local = jsonEncode({
       'version': 1,

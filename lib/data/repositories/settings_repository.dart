@@ -55,4 +55,31 @@ class SettingsRepository {
     }
     await batch.commit(noResult: true);
   }
+
+  static const vaultClearedAtKey = 'vault_cleared_at';
+
+  /// Account-wide wipe timestamp (UTC). Survives in settings + Drive envelope.
+  Future<DateTime?> getVaultClearedAt() async {
+    final db = await _db.database;
+    final rows = await db.query(
+      'settings',
+      where: 'key = ?',
+      whereArgs: [vaultClearedAtKey],
+      limit: 1,
+    );
+    if (rows.isEmpty) return null;
+    return DateTime.tryParse('${rows.first['value']}')?.toUtc();
+  }
+
+  Future<void> setVaultClearedAt(DateTime at) async {
+    final db = await _db.database;
+    await db.insert(
+      'settings',
+      {
+        'key': vaultClearedAtKey,
+        'value': at.toUtc().toIso8601String(),
+      },
+      conflictAlgorithm: ConflictAlgorithm.replace,
+    );
+  }
 }

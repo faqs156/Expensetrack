@@ -673,6 +673,42 @@ class GoogleDriveSyncService extends ChangeNotifier {
     }
   }
 
+  /// Publish an intentional account wipe (empty txs + [cleared_at]) to Drive.
+  /// Cancels pending debounced pushes that could race with the wipe.
+  Future<void> publishAccountWipe(String wipedJson) async {
+    _pushDebounce?.cancel();
+    _pendingBackupBuilder = () async => wipedJson;
+    await _setPendingPush(true);
+    await markLocalChanged();
+
+    if (!isSignedIn) {
+      await ensureGoogleConnected(
+        timeout: const Duration(seconds: 40),
+        allowPrompt: true,
+      );
+    }
+    await pushBackup(wipedJson, interactive: true);
+    // Overwrite .prev with the wipe too so it cannot resurrect old rows alone.
+    try {
+      final api = await _driveApi(interactive: true);
+      final bytes = utf8.encode(wipedJson);
+      final media = drive.Media(Stream.value(bytes), bytes.length);
+      final prevId = await _findFileId(api, GoogleAuthConfig.syncPrevFileName);
+      if (prevId == null) {
+        await api.files.create(
+          drive.File()
+            ..name = GoogleAuthConfig.syncPrevFileName
+            ..parents = ['appDataFolder'],
+          uploadMedia: media,
+        );
+      } else {
+        await api.files.update(drive.File(), prevId, uploadMedia: media);
+      }
+    } catch (_) {}
+    await _setPendingPush(false);
+    _autoFlushAttempts = 0;
+  }
+
   Future<void> syncNow({
     required Future<String> Function() buildBackupJson,
     required Future<void> Function(String json) restoreBackup,

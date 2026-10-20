@@ -625,14 +625,24 @@ class AppController extends ChangeNotifier with WidgetsBindingObserver {
   }
 
   Future<void> clearAllData() async {
+    // Account-wide wipe marker — sync merge drops older txs from Drive / peers.
+    final wipeAt = DateTime.now().toUtc();
+    await _settingsRepo.setVaultClearedAt(wipeAt);
     await _transactions.clearAll();
-    final db = await _budgets.exportRows();
-    if (db.isNotEmpty) {
-      await _budgets.restore([]);
-    }
+    await _budgets.restore([]);
+    await _vaultSafety.clearAll();
     await refreshDashboard();
     await refreshTransactions();
-    _persistSurvival();
+    notifyListeners();
+
+    // Publish wipe to the shared vault so other devices and Drive don't restore it.
+    try {
+      final json = await _backup.createBackupJson();
+      await driveSync.publishAccountWipe(json);
+    } catch (_) {
+      // Still cleared locally; Sync now can publish the wipe later.
+      driveSync.schedulePush(() => _backup.createBackupJson());
+    }
   }
 
   BudgetStatus categoryBudgetStatus(String categoryId) {

@@ -73,6 +73,12 @@ class VaultSafetyService {
     return json;
   }
 
+  /// Drop all snapshots (required after an intentional account wipe).
+  Future<void> clearAll() async {
+    final db = await _db.database;
+    await db.delete('vault_snapshots');
+  }
+
   static int _txCount(String json) {
     try {
       final decoded = jsonDecode(json);

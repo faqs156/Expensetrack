@@ -174,7 +174,9 @@ class SettingsScreen extends StatelessWidget {
       builder: (ctx) => AlertDialog(
         title: const Text('Clear all transactions?'),
         content: const Text(
-          'This permanently deletes every transaction and budget. Categories and settings are kept. Type CLEAR to confirm.',
+          'This permanently deletes every transaction and budget on your account '
+          '(all devices after sync). Categories and theme settings are kept. '
+          'Type CLEAR to confirm.',
         ),
         actions: [
           TextButton(

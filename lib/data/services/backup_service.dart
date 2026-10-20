@@ -10,7 +10,15 @@ class BackupService {
   Future<String> createBackupJson() async {
     final db = await _db.database;
     final now = DateTime.now().toUtc().toIso8601String();
-    final payload = {
+    final clearedRows = await db.query(
+      'settings',
+      where: 'key = ?',
+      whereArgs: ['vault_cleared_at'],
+      limit: 1,
+    );
+    final clearedAt =
+        clearedRows.isEmpty ? null : clearedRows.first['value'] as String?;
+    final payload = <String, Object?>{
       'version': 1,
       'created_at': now,
       'updated_at': now,
@@ -18,7 +26,11 @@ class BackupService {
       'transactions': await db.query('transactions'),
       'budgets': await db.query('budgets'),
       'settings': await db.query('settings'),
+      'sync_target': 'google_drive_appdata',
     };
+    if (clearedAt != null && clearedAt.isNotEmpty) {
+      payload['cleared_at'] = clearedAt;
+    }
     return const JsonEncoder.withIndent('  ').convert(payload);
   }
 
@@ -119,28 +131,56 @@ class BackupService {
     final localMap = Map<String, dynamic>.from(local);
     final remoteMap = Map<String, dynamic>.from(remote);
 
+    final wipeAt = _maxClearedAt(localMap, remoteMap);
+
     final categories = _mergeById(
       _staticAsMaps(localMap['categories']),
       _staticAsMaps(remoteMap['categories']),
       idOf: (r) => '${r['id'] ?? ''}',
       isNewer: (a, b) => _rowUpdatedMs(a) >= _rowUpdatedMs(b),
     );
-    final transactions = _mergeById(
+    var transactions = _mergeById(
       _staticAsMaps(localMap['transactions']),
       _staticAsMaps(remoteMap['transactions']),
       idOf: (r) => '${r['id'] ?? ''}',
       isNewer: (a, b) => _rowUpdatedMs(a) >= _rowUpdatedMs(b),
     );
-    final budgets = _mergeById(
-      _staticAsMaps(localMap['budgets']),
-      _staticAsMaps(remoteMap['budgets']),
-      idOf: (r) => '${r['month_key'] ?? ''}\u0000${r['category_id'] ?? ''}',
-      isNewer: (a, b) {
-        final aa = _asIntStatic(a['amount_paise'], 0);
-        final bb = _asIntStatic(b['amount_paise'], 0);
-        return aa >= bb;
-      },
-    );
+    // Account wipe: drop txs that predate the wipe (stops Clear all from
+    // coming back via Drive / other devices / safety snapshots).
+    if (wipeAt != null) {
+      final wipeMs = wipeAt.millisecondsSinceEpoch;
+      transactions =
+          transactions.where((r) => _rowUpdatedMs(r) >= wipeMs).toList();
+    }
+
+    List<Map<String, Object?>> budgets;
+    if (wipeAt != null) {
+      // Budgets from the wipe snapshot win (usually empty).
+      final localCleared = _parseClearedAt(localMap['cleared_at']);
+      final remoteCleared = _parseClearedAt(remoteMap['cleared_at']);
+      if (localCleared != null &&
+          localCleared.millisecondsSinceEpoch == wipeAt.millisecondsSinceEpoch) {
+        budgets = _staticAsMaps(localMap['budgets']);
+      } else if (remoteCleared != null &&
+          remoteCleared.millisecondsSinceEpoch ==
+              wipeAt.millisecondsSinceEpoch) {
+        budgets = _staticAsMaps(remoteMap['budgets']);
+      } else {
+        budgets = [];
+      }
+    } else {
+      budgets = _mergeById(
+        _staticAsMaps(localMap['budgets']),
+        _staticAsMaps(remoteMap['budgets']),
+        idOf: (r) => '${r['month_key'] ?? ''}\u0000${r['category_id'] ?? ''}',
+        isNewer: (a, b) {
+          final aa = _asIntStatic(a['amount_paise'], 0);
+          final bb = _asIntStatic(b['amount_paise'], 0);
+          return aa >= bb;
+        },
+      );
+    }
+
     final settings = _mergeById(
       _staticAsMaps(localMap['settings']),
       _staticAsMaps(remoteMap['settings']),
@@ -148,9 +188,17 @@ class BackupService {
       // When processing remote rows: replace local only if we prefer remote.
       isNewer: (incoming, existing) => preferSettings == 'remote',
     );
+    // Keep the wipe marker in settings too.
+    if (wipeAt != null) {
+      settings.removeWhere((r) => '${r['key']}' == 'vault_cleared_at');
+      settings.add({
+        'key': 'vault_cleared_at',
+        'value': wipeAt.toIso8601String(),
+      });
+    }
 
     final now = DateTime.now().toUtc().toIso8601String();
-    final payload = {
+    final payload = <String, Object?>{
       'version': 1,
       'created_at': localMap['created_at'] ?? remoteMap['created_at'] ?? now,
       'updated_at': now,
@@ -160,7 +208,26 @@ class BackupService {
       'settings': settings,
       'sync_target': 'google_drive_appdata',
     };
+    if (wipeAt != null) {
+      payload['cleared_at'] = wipeAt.toIso8601String();
+    }
     return const JsonEncoder.withIndent('  ').convert(payload);
+  }
+
+  static DateTime? _parseClearedAt(Object? raw) {
+    if (raw == null) return null;
+    return DateTime.tryParse('$raw')?.toUtc();
+  }
+
+  static DateTime? _maxClearedAt(
+    Map<String, dynamic> a,
+    Map<String, dynamic> b,
+  ) {
+    final ca = _parseClearedAt(a['cleared_at']);
+    final cb = _parseClearedAt(b['cleared_at']);
+    if (ca == null) return cb;
+    if (cb == null) return ca;
+    return ca.isAfter(cb) ? ca : cb;
   }
 
   static List<Map<String, Object?>> _staticAsMaps(dynamic value) {
